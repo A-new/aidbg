@@ -1,0 +1,15 @@
+is_debugger_present=0
+peb_being_debugged=0
+peb_ntglobalflag=0
+heap_flags=0
+startup_info=0
+process_debug_port=0
+process_debug_object=0
+process_debug_flags=0
+kernel_debugger=0
+debugobject_types=0
+close_invalid_handle=0
+remote_debugger=0
+hardware_breakpoints=0
+thread_hide_from_debugger=0
+nt_yield_execution_raw=0

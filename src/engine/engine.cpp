@@ -7,6 +7,7 @@
 
 #include "engine/disasm.h"
 #include "engine/exports.h"
+#include "engine/ntview.h"
 #include "engine/win_compat.h"
 #include "util/strutil.h"
 
@@ -105,143 +106,114 @@ uint64_t pe_image_base_path(const std::wstring& path) {
 // --------------------------------------------------------- fixed-base launch
 // These live in namespace aj (not the anonymous one): engine.h declares them.
 
-// IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE is what makes the loader relocate the
-// image; no per-process mitigation policy overrides it. To pin the load address
-// to the PE ImageBase the flag has to be cleared before the loader reads it,
-// so the header is patched and restored around the CreateProcess call.
+// IMAGE_DLLCHARACTERISTICS flags that make the kernel relocate the image.
 constexpr uint16_t kDynamicBase = 0x0040;
 constexpr uint16_t kHighEntropyVa = 0x0020;
 
-struct PePatch {
-    bool active = false;
-    std::wstring path;
-    HANDLE file = INVALID_HANDLE_VALUE;  // kept open: once the image is mapped
-                                         // the file cannot be reopened for writing
-    uint64_t offset = 0;
-    uint8_t original[2] = {0, 0};
-};
+static bool patch_file_flag(const std::wstring& path, size_t offset, uint8_t lo, uint8_t hi) {
+    HANDLE w = CreateFileW(path.c_str(), GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (w == INVALID_HANDLE_VALUE) return false;
+    uint8_t nb[2] = {lo, hi};
+    DWORD got = 0;
+    SetFilePointer(w, (LONG)offset, nullptr, FILE_BEGIN);
+    BOOL ok = WriteFile(w, nb, 2, &got, nullptr) && got == 2;
+    CloseHandle(w);
+    return ok != FALSE;
+}
 
-// A patched copy of the target whose image loads at the PE ImageBase. See the
-// declaration in engine.h for why the original is never touched.
-bool patch_file_disable_aslr(const std::wstring& path, std::string& err) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+// Prepares a fixed-base launch WITHOUT ever writing the target's own bytes:
+// the original file is renamed aside (bytes untouched), a patched copy takes
+// its place for the CreateProcess call, and revert() swaps the original back
+// before the target can execute - so the path the target sees (and hashes, in
+// a self-check) holds exactly the original file again. Windows refuses to
+// write, replace or delete a running image's file, but plain renames of
+// running images are allowed - which is what the swap relies on.
+bool TransientPePatch::clear_dynamic_base(const std::wstring& path) {
+    target = path;
+    orig = path + L".aidbg-orig";
+    staged = path + L".aidbg-patched";
+
+    // locate DllCharacteristics without touching the file
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        err = fmt("cannot open '%s' for patching: %s", to_utf8(path).c_str(),
-                  last_error_text().c_str());
+        err = fmt("cannot open '%s': %s", to_utf8(path).c_str(), last_error_text().c_str());
         return false;
     }
-    auto fail = [&](const char* what) {
-        err = fmt("cannot patch target: %s", what);
-        CloseHandle(h);
-        return false;
-    };
-
-    uint8_t dos[0x40];
+    uint8_t hdr[0x60];
     DWORD got = 0;
-    if (!ReadFile(h, dos, sizeof(dos), &got, nullptr) || got != sizeof(dos))
-        return fail("truncated DOS header");
-    uint32_t lfanew = *(uint32_t*)(dos + 0x3C);
-    if (lfanew > 0x1000) return fail("bad e_lfanew");
-
-    uint8_t opt[0x50];
-    SetFilePointer(h, (LONG)(lfanew + 24), nullptr, FILE_BEGIN);
-    if (!ReadFile(h, opt, sizeof(opt), &got, nullptr) || got != sizeof(opt))
-        return fail("truncated optional header");
-    uint16_t magic = *(uint16_t*)opt;
-    if (magic != 0x10B && magic != 0x20B) return fail("not a PE image");
-
-    // DllCharacteristics sits at +0x46 in both PE32 and PE32+ optional headers
-    uint16_t dllch = *(uint16_t*)(opt + 0x46);
-    uint16_t patched = (uint16_t)(dllch & ~(kDynamicBase | kHighEntropyVa));
-    if (patched == dllch) {
-        CloseHandle(h);
-        return true;
-    }
-    uint8_t nb[2] = {(uint8_t)patched, (uint8_t)(patched >> 8)};
-    SetFilePointer(h, (LONG)(lfanew + 24 + 0x46), nullptr, FILE_BEGIN);
-    if (!WriteFile(h, nb, 2, &got, nullptr) || got != 2) {
-        err = "cannot write the patched header";
-        CloseHandle(h);
-        return false;
-    }
-    FlushFileBuffers(h);
+    uint32_t lfanew = 0;
+    uint16_t dllch = 0, cleared = 0;
+    size_t field_offset = 0;
+    bool ok = false;
+    do {
+        if (!ReadFile(h, hdr, sizeof(hdr), &got, nullptr) || got != sizeof(hdr)) break;
+        lfanew = *(uint32_t*)(hdr + 0x3C);
+        if (lfanew > 0x1000) break;
+        if (SetFilePointer(h, (LONG)lfanew + 24, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
+            break;
+        uint8_t opt[0x48];
+        if (!ReadFile(h, opt, sizeof(opt), &got, nullptr) || got != sizeof(opt)) break;
+        uint16_t magic = *(uint16_t*)opt;
+        if (magic != 0x10B && magic != 0x20B) break;
+        dllch = *(uint16_t*)(opt + 0x46);
+        cleared = (uint16_t)(dllch & ~(kDynamicBase | kHighEntropyVa));
+        field_offset = (size_t)lfanew + 24 + 0x46;
+        ok = true;
+    } while (false);
     CloseHandle(h);
+    if (!ok) {
+        err = "bad PE image (cannot locate DllCharacteristics)";
+        return false;
+    }
+    if (cleared == dllch) return true;  // already honours the ImageBase
+
+    // leftovers of an earlier crashed run are not in use now
+    DeleteFileW(orig.c_str());
+    DeleteFileW(staged.c_str());
+
+    // 1) the original is renamed aside - its bytes are never touched
+    if (!MoveFileExW(path.c_str(), orig.c_str(), 0)) {
+        err = fmt("cannot move the original aside: %s", last_error_text().c_str());
+        return false;
+    }
+    // 2) a copy takes the path and only that copy is patched
+    if (!CopyFileW(orig.c_str(), path.c_str(), FALSE) ||
+        !patch_file_flag(path, field_offset, (uint8_t)cleared, (uint8_t)(cleared >> 8))) {
+        err = fmt("cannot prepare the patched copy: %s", last_error_text().c_str());
+        DeleteFileW(path.c_str());
+        MoveFileExW(orig.c_str(), path.c_str(), 0);  // roll back
+        return false;
+    }
+    patched = true;
     return true;
 }
 
-std::wstring dir_of(const std::wstring& path) {
-    size_t p = path.find_last_of(L"\\/");
-    return p == std::wstring::npos ? std::wstring() : path.substr(0, p);
-}
-std::wstring name_of(const std::wstring& path) {
-    size_t p = path.find_last_of(L"\\/");
-    return p == std::wstring::npos ? path : path.substr(p + 1);
-}
-
-bool make_fixed_base_copy(const std::wstring& original, FixedBaseCopy& out, std::string& err) {
-    out = FixedBaseCopy();
-    out.original = original;
-
-    std::wstring dir = dir_of(original);
-    std::wstring base = name_of(original);
-    std::wstring hidden = dir.empty() ? std::wstring(L".aidbg-fixbase")
-                                      : (dir + L"\\.aidbg-fixbase");
-    if (!CreateDirectoryW(hidden.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
-        // the target's directory may be read-only; fall back to %TEMP%
-        wchar_t tmp[MAX_PATH];
-        GetTempPathW(MAX_PATH, tmp);
-        hidden = std::wstring(tmp) + L"aidbg-fixbase";
-        if (!CreateDirectoryW(hidden.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
-            err = "cannot create a directory for the fixed-base copy";
-            return false;
+void TransientPePatch::revert() {
+    if (patched) {
+        // The running image keeps its file object no matter the name, so the
+        // patched copy is renamed away and the pristine original takes the
+        // path back - before the target has executed a single instruction.
+        bool restored = false;
+        if (MoveFileExW(target.c_str(), staged.c_str(), 0)) {
+            restored = MoveFileExW(orig.c_str(), target.c_str(), 0) != FALSE;
+            if (!restored) MoveFileExW(staged.c_str(), target.c_str(), 0);  // roll back
         }
-    }
-
-    std::wstring copy = hidden + L"\\" + base;
-    if (!CopyFileW(original.c_str(), copy.c_str(), FALSE)) {
-        err = fmt("cannot copy the target: %s", last_error_text().c_str());
-        return false;
-    }
-    // bring the debug database along so symbols still resolve
-    size_t dot = base.find_last_of(L'.');
-    if (dot != std::wstring::npos) {
-        std::wstring pdb = dir + L"\\" + base.substr(0, dot) + L".pdb";
-        CopyFileW(pdb.c_str(), (hidden + L"\\" + base.substr(0, dot) + L".pdb").c_str(), TRUE);
-    }
-
-    if (!patch_file_disable_aslr(copy, err)) {
-        DeleteFileW(copy.c_str());
-        return false;
-    }
-    out.created = true;
-    out.path = copy;
-    out.dir = hidden;
-    return true;
-}
-
-void cleanup_fixed_base_copy(FixedBaseCopy& c) {
-    if (!c.created) return;
-    // the image handle can outlive TerminateProcess for a moment, so retry
-    auto drop = [](const std::wstring& p) {
-        for (int i = 0; i < 20; ++i) {
-            if (DeleteFileW(p.c_str())) return true;
-            if (GetLastError() == ERROR_FILE_NOT_FOUND) return true;
-            Sleep(50);
+        if (!restored) {
+            err = fmt("RESTORE FAILED (%s) - the target path still holds the patched file; "
+                      "the pristine copy is at %s",
+                      last_error_text().c_str(), to_utf8(orig).c_str());
+            return;
         }
-        return false;
-    };
-    drop(c.path);
-    std::wstring base = name_of(c.path);
-    size_t dot = base.find_last_of(L'.');
-    if (dot != std::wstring::npos) {
-        std::wstring stem = base.substr(0, dot);
-        drop(c.dir + L"\\" + stem + L".pdb");
-        drop(c.dir + L"\\" + stem + L".ilk");
-        drop(c.dir + L"\\" + stem + L".obj");
+        patched = false;
+        // the renamed-away patched image can only be deleted once the target
+        // has exited; leftovers are cleaned up on the next fixed-base launch
+        if (!DeleteFileW(staged.c_str()))
+            err = fmt("note: '%s' stays until the target exits (its image is still mapped)",
+                      to_utf8(staged).c_str());
     }
-    RemoveDirectoryW(c.dir.c_str());
-    c.created = false;
 }
 
 std::string stop_reason_text(StopReason r) {
@@ -288,7 +260,6 @@ Engine::~Engine() {
         if (p.handle) CloseHandle(p.handle);
     }
     processes_.clear();
-    cleanup_fixed_base_copy(fixbase_copy_);
 }
 
 // ---------------------------------------------------------------- processes
@@ -403,24 +374,17 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
                   (new_console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW);
     follow_children_ = follow_children;
 
-    // Turning ASLR off makes the loader honour the PE ImageBase, so the runtime
+    // Turning ASLR off makes the image live at the PE ImageBase, so the runtime
     // addresses line up with what a static disassembler shows (0x140000000 for
-    // x64, 0x400000 for x86 by default). The original file is never modified:
-    // a patched copy is launched instead (see make_fixed_base_copy).
-    std::wstring launch_path = wexe;
-    std::wstring launch_cmd = cmdline;
-    fixbase_copy_ = FixedBaseCopy();
-    if (fixed_base) {
-        std::string copy_err;
-        if (!make_fixed_base_copy(wexe, fixbase_copy_, copy_err)) {
-            err = copy_err;
-            return false;
-        }
-        if (fixbase_copy_.created) {
-            launch_path = fixbase_copy_.path;
-            launch_cmd = L"\"" + launch_path + L"\"";
-            if (!args.empty()) launch_cmd += L" " + to_wide(args);
-        }
+    // x64, 0x400000 for x86 by default). The DYNAMIC_BASE flag is cleared in
+    // the file's in-memory pages before CreateProcess and restored right after
+    // it returns: the kernel builds the image section from those pages, so the
+    // image loads at the preferred base by itself while the file on disk (and
+    // any self-check the target performs on it) stays byte-identical.
+    TransientPePatch patch;
+    if (fixed_base && !patch.clear_dynamic_base(wexe)) {
+        err = "fixed-base launch failed: " + patch.err + " (use --aslr to keep ASLR)";
+        return false;
     }
 
     STARTUPINFOW si;
@@ -429,14 +393,21 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
     PROCESS_INFORMATION pi;
     std::memset(&pi, 0, sizeof(pi));
     std::wstring wcwd = cwd.empty() ? std::wstring() : to_wide(cwd);
-    BOOL ok = CreateProcessW(launch_path.c_str(), launch_cmd.data(), nullptr, nullptr, FALSE,
-                             flags, nullptr, wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
+    BOOL ok = CreateProcessW(wexe.c_str(), cmdline.data(), nullptr, nullptr, FALSE, flags,
+                             nullptr, wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
     DWORD create_err = ok ? 0 : GetLastError();
+    patch.revert();  // pristine bytes again before the target can look at them
+    if (!patch.err.empty()) {
+        // a failed restore leaves the user's file patched - shout about it
+        Output::instance().event("error", patch.err, Json::obj());
+        std::fprintf(stderr, "[aidbg] %s\n", patch.err.c_str());
+        std::fflush(stderr);
+    }
     if (!ok) {
-        cleanup_fixed_base_copy(fixbase_copy_);
         err = fmt("CreateProcess(%s) failed: %s", exe.c_str(), last_error_text(create_err).c_str());
         return false;
     }
+
     // The CREATE_PROCESS event hands us the handles to keep; drop these.
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
@@ -509,7 +480,6 @@ bool Engine::detach(std::string& err) {
     thread_handle_ = nullptr;
     has_pending_ = false;
     stop_ = StopInfo{};
-    cleanup_fixed_base_copy(fixbase_copy_);
     return true;
 }
 
@@ -541,7 +511,6 @@ bool Engine::kill(std::string& err) {
     thread_handle_ = nullptr;
     has_pending_ = false;
     stop_ = StopInfo{StopReason::Exit, "process terminated"};
-    cleanup_fixed_base_copy(fixbase_copy_);
     return true;
 }
 

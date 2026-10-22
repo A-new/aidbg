@@ -1,0 +1,5 @@
+path=D:\crack\debug\code\aidbg\tests\selfcheck.exe
+loaded_base=0x00007FF6A8B80000
+file_crc=0x4524D66E
+expected_crc=0x00000000
+self_check=FAIL

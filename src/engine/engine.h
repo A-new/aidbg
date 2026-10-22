@@ -19,21 +19,28 @@
 
 namespace aj {
 
-// A patched copy of the target used for fixed-base (ASLR-off) launches. The
-// original file is never modified: once a PE is mapped as an image Windows
-// refuses further writes to it (ERROR_SHARING_VIOLATION), so patching the
-// original would leave it permanently modified. The copy keeps the same file
-// name inside a hidden sibling directory so module names stay identical.
-struct FixedBaseCopy {
-    bool created = false;
-    std::wstring path;      // what we actually launch
-    std::wstring dir;       // hidden directory holding it
-    std::wstring original;  // the target the user asked for
-};
+// Fixed-base (ASLR-off) launch that never writes the target's own bytes.
+//
+// The DYNAMIC_BASE flag is what makes the kernel relocate the image, and the
+// kernel reads it while creating the image section during CreateProcess. The
+// file itself must not be modified, and Windows refuses to write, replace or
+// delete a running image's file - so the launch swaps the file by *renaming*
+// (which Windows allows even for running images): the original is renamed
+// aside untouched, a patched copy takes the path for the CreateProcess call,
+// and revert() renames the original back before the target can execute one
+// instruction. The path the target sees - and hashes, in a self-check - holds
+// exactly the original file again.
+struct TransientPePatch {
+    std::wstring target;  // the path the user asked to run
+    std::wstring orig;    // original file, renamed aside (pristine)
+    std::wstring staged;  // patched copy, renamed away after the launch
+    bool patched = false; // the path currently holds the patched copy
+    std::string err;
 
-bool patch_file_disable_aslr(const std::wstring& path, std::string& err);
-bool make_fixed_base_copy(const std::wstring& original, FixedBaseCopy& out, std::string& err);
-void cleanup_fixed_base_copy(FixedBaseCopy& c);
+    bool clear_dynamic_base(const std::wstring& path);
+    void revert();
+    ~TransientPePatch() { revert(); }
+};
 
 struct ModuleInfo {
     uint64_t base = 0;
@@ -262,7 +269,6 @@ private:
     uint32_t current_tid_ = 0;
     HANDLE thread_handle_ = nullptr;  // handle of the current thread
     bool follow_children_ = true;
-    FixedBaseCopy fixbase_copy_;      // patched copy, if the last launch used one
 
     DEBUG_EVENT pending_{};
     bool has_pending_ = false;
