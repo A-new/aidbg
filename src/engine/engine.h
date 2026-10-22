@@ -121,6 +121,13 @@ public:
     bool detach(std::string& err);
     bool kill(std::string& err);
 
+    // DLL targets: a DLL cannot be created as a process, so launch() runs it
+    // inside a small host stub extracted from aidbg's own resources (the stub
+    // loads the DLL and optionally calls one export). `args` then means
+    // "[export]". Fixed-base applies to the DLL itself and stays in effect
+    // until the loader maps it.
+    static bool is_dll_image(const std::wstring& path);
+
     bool active() const {
         for (const auto& p : processes_)
             if (p.alive) return true;
@@ -271,6 +278,9 @@ private:
     uint32_t current_tid_ = 0;
     HANDLE thread_handle_ = nullptr;  // handle of the current thread
     bool follow_children_ = true;
+    // DLL target support: extracted host stub and the still-active base swap
+    std::wstring dll_host_stub_;
+    TransientPePatch dll_patch_;
 
     DEBUG_EVENT pending_{};
     bool has_pending_ = false;

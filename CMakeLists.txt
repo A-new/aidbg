@@ -86,6 +86,7 @@ set(AIDBG_SOURCES
   src/engine/engine.cpp
   src/cmd/commands.cpp
   src/mcp/mcp_server.cpp
+  src/host/aidbg.rc
   src/main.cpp
 )
 

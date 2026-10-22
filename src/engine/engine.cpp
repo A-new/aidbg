@@ -123,6 +123,88 @@ static bool patch_file_flag(const std::wstring& path, size_t offset, uint8_t lo,
     return ok != FALSE;
 }
 
+// PE basics straight from the file: machine, entry point RVA, DLL flag.
+bool pe_file_basics(const std::wstring& path, uint16_t& machine, uint32_t& entry_rva,
+                    bool& is_dll) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    uint8_t hdr[0x60];
+    DWORD got = 0;
+    bool ok = false;
+    uint32_t lfanew = 0;
+    do {
+        if (!ReadFile(h, hdr, sizeof(hdr), &got, nullptr) || got != sizeof(hdr)) break;
+        lfanew = *(uint32_t*)(hdr + 0x3C);
+        if (lfanew > 0x1000) break;
+        uint8_t nth[4 + 20 + 0x18];
+        SetFilePointer(h, (LONG)lfanew, nullptr, FILE_BEGIN);
+        if (!ReadFile(h, nth, sizeof(nth), &got, nullptr) || got != sizeof(nth)) break;
+        if (*(uint32_t*)nth != 0x00004550) break;
+        machine = *(uint16_t*)(nth + 4);
+        uint16_t characteristics = *(uint16_t*)(nth + 4 + 18);
+        is_dll = (characteristics & 0x2000) != 0;  // IMAGE_FILE_DLL
+        const uint8_t* opt = nth + 4 + 20;
+        uint16_t magic = *(uint16_t*)opt;
+        if (magic != 0x10B && magic != 0x20B) break;
+        entry_rva = *(uint32_t*)(opt + 0x10);
+        ok = true;
+    } while (false);
+    CloseHandle(h);
+    return ok;
+}
+
+// Extracts the embedded DLL-host stub (both architectures live in aidbg's
+// resources - a 64-bit process cannot load a 32-bit DLL).
+bool extract_dll_host(bool want32, std::wstring& out, std::string& err) {
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    out = std::wstring(tmp) + L"aidbg-dhost-" + std::to_wstring(GetCurrentProcessId()) +
+          (want32 ? L"-32.exe" : L"-64.exe");
+    HMODULE self = GetModuleHandleW(nullptr);
+    HRSRC res = FindResourceW(self, MAKEINTRESOURCEW(want32 ? 102 : 101), MAKEINTRESOURCEW(10) /*RT_RCDATA*/);
+    if (!res) {
+        err = "DLL host stub resource is missing from this build";
+        return false;
+    }
+    HGLOBAL h = LoadResource(self, res);
+    DWORD size = SizeofResource(self, res);
+    const void* data = LockResource(h);
+    if (!h || !data || !size) {
+        err = "cannot read the DLL host stub resource";
+        return false;
+    }
+    HANDLE f = CreateFileW(out.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        err = fmt("cannot extract the DLL host stub: %s", last_error_text().c_str());
+        return false;
+    }
+    DWORD wrote = 0;
+    BOOL ok = WriteFile(f, data, size, &wrote, nullptr) && wrote == size;
+    CloseHandle(f);
+    if (!ok) {
+        err = "cannot write the DLL host stub";
+        DeleteFileW(out.c_str());
+        return false;
+    }
+    return true;
+}
+
+// The fixed-base swap renames the target file aside; that must never be tried
+// on operating system files (they cannot - and must not - be moved).
+bool is_system_path(const std::wstring& path) {
+    wchar_t sys[MAX_PATH], win[MAX_PATH];
+    GetSystemDirectoryW(sys, MAX_PATH);
+    GetWindowsDirectoryW(win, MAX_PATH);
+    std::wstring p = path;
+    std::wstring s = sys, w = win;
+    auto starts = [](const std::wstring& a, const std::wstring& b) {
+        return a.size() >= b.size() && _wcsicmp(a.substr(0, b.size()).c_str(), b.c_str()) == 0;
+    };
+    return starts(p, s + L"\\") || starts(p, w + L"\\");
+}
+
 // Prepares a fixed-base launch WITHOUT ever writing the target's own bytes:
 // the original file is renamed aside (bytes untouched), a patched copy takes
 // its place for the CreateProcess call, and revert() swaps the original back
@@ -381,6 +463,33 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
     std::wstring cmdline = L"\"" + wexe + L"\"";
     if (!args.empty()) cmdline += L" " + to_wide(args);
 
+    // ---- DLL targets run inside an embedded host stub ---------------------
+    // A DLL cannot be created as a process. The stub loads it (which runs its
+    // DllMain) and optionally calls one export; for a DLL target `args` means
+    // "[export]".
+    std::wstring dll_path;  // non-empty when the target is a DLL
+    std::string dll_export;
+    uint32_t dll_entry = 0;
+    std::wstring launch_exe = wexe;
+    if (is_dll_image(wexe)) {
+        uint16_t machine = 0;
+        bool is_dll = false;
+        if (!pe_file_basics(wexe, machine, dll_entry, is_dll)) {
+            err = "bad PE image: " + exe;
+            return false;
+        }
+        dll_path = wexe;
+        dll_export = trim(args);
+        std::string e2;
+        if (!extract_dll_host(machine == 0x14C, dll_host_stub_, e2)) {
+            err = e2;
+            return false;
+        }
+        launch_exe = dll_host_stub_;
+        cmdline = L"\"" + dll_host_stub_ + L"\" \"" + wexe + L"\"";
+        if (!dll_export.empty()) cmdline += L" \"" + to_wide(dll_export) + L"\"";
+    }
+
     // The debuggee's stdout must never interleave with our JSON stream, so by
     // default it gets no console at all. Use --console when its output matters.
     // DEBUG_PROCESS also reports processes the target spawns; DEBUG_ONLY_THIS_PROCESS
@@ -395,11 +504,30 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
     // the file's in-memory pages before CreateProcess and restored right after
     // it returns: the kernel builds the image section from those pages, so the
     // image loads at the preferred base by itself while the file on disk (and
-    // any self-check the target performs on it) stays byte-identical.
+    // any self-check the target performs on it) stays byte-identical. For a DLL
+    // target the swap must stay active until the loader maps the DLL, so it
+    // lives in dll_patch_ and is reverted at the LOAD_DLL event.
     TransientPePatch patch;
-    if (fixed_base && !patch.clear_dynamic_base(wexe)) {
-        err = "fixed-base launch failed: " + patch.err + " (use --aslr to keep ASLR)";
-        return false;
+    bool pin_base = fixed_base;
+    if (pin_base && is_system_path(dll_path.empty() ? wexe : dll_path)) {
+        // never rename operating system files aside, not even briefly
+        Output::instance().event("warning",
+                                 "fixed base skipped for a system file, loading with ASLR",
+                                 Json::obj());
+        pin_base = false;
+    }
+    if (pin_base) {
+        TransientPePatch& target_patch = dll_path.empty() ? patch : dll_patch_;
+        if (!target_patch.clear_dynamic_base(dll_path.empty() ? wexe : dll_path)) {
+            // fall back to a normal (relocated) launch instead of failing:
+            // the session still works, `modules` shows a non-zero slide
+            Json d = Json::obj();
+            d.set_str("reason", target_patch.err);
+            Output::instance().event(
+                "warning", "fixed base unavailable, continuing with ASLR (slide will be "
+                           "non-zero; add --aslr to silence this)",
+                d);
+        }
     }
 
     STARTUPINFOW si;
@@ -408,10 +536,10 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
     PROCESS_INFORMATION pi;
     std::memset(&pi, 0, sizeof(pi));
     std::wstring wcwd = cwd.empty() ? std::wstring() : to_wide(cwd);
-    BOOL ok = CreateProcessW(wexe.c_str(), cmdline.data(), nullptr, nullptr, FALSE, flags,
+    BOOL ok = CreateProcessW(launch_exe.c_str(), cmdline.data(), nullptr, nullptr, FALSE, flags,
                              nullptr, wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
     DWORD create_err = ok ? 0 : GetLastError();
-    patch.revert();  // pristine bytes again before the target can look at them
+    if (dll_path.empty()) patch.revert();  // pristine bytes again before the target sees them
     if (!patch.err.empty()) {
         // a failed restore leaves the user's file patched - shout about it
         Output::instance().event("error", patch.err, Json::obj());
@@ -419,6 +547,7 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
         std::fflush(stderr);
     }
     if (!ok) {
+        dll_patch_.revert();
         err = fmt("CreateProcess(%s) failed: %s", exe.c_str(), last_error_text(create_err).c_str());
         return false;
     }
@@ -427,11 +556,31 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
+    // Debug the DLL itself: stop when it is mapped, then at its entry point
+    // (DllMain). Both are pending breakpoints - they resolve on the load.
+    if (!dll_path.empty()) {
+        std::string dllname = base_name_of(to_utf8(dll_path));
+        std::string e2;
+        add_module_break(dllname, e2);
+        Breakpoint bp;
+        bp.kind = BpKind::Software;
+        bp.symbol = dllname + "+0x" + hex_no_prefix(dll_entry);
+        bp.resolved = false;
+        bps.add(bp);
+    }
+
     stop_at_entry_ = true;
     awaiting_entry_ = true;
     stop_ = StopInfo{};
     // pump the debug loop until the first meaningful stop (the entry breakpoint)
     return wait_for_stop(0, err);
+}
+
+bool Engine::is_dll_image(const std::wstring& path) {
+    uint16_t machine = 0;
+    uint32_t entry = 0;
+    bool is_dll = false;
+    return pe_file_basics(path, machine, entry, is_dll) && is_dll;
 }
 
 bool Engine::attach(uint32_t pid, std::string& err) {
@@ -472,6 +621,7 @@ bool Engine::detach(std::string& err) {
     }
     // restore any planted breakpoints so the targets keep working
     hide.unplant_all();  // ntdll hook INT3s must not survive the detach
+    dll_patch_.revert();  // a DLL base swap must not outlive the session
     for (auto& bp : bps.all()) {
         if (bp.kind == BpKind::Software) {
             for (auto& kv : bp.plants) {
@@ -518,6 +668,7 @@ bool Engine::kill(std::string& err) {
             if (p && kv.second.planted) bps.unplant_software(p->handle, kv.first, bp, err);
         }
     }
+    dll_patch_.revert();  // a DLL base swap must not outlive the session
     continue_pending(pending_status_);
     for (auto& p : processes_)
         if (p.alive) TerminateProcess(p.handle, 1);
@@ -813,6 +964,11 @@ void Engine::on_load_dll(DEBUG_EVENT& ev, bool& stop) {
     sym.load_module(m.base, (size_t)m.size, m.path, m.name, e);
     resolve_deferred_breakpoints();
     hide.on_module_loaded(p->pid, p->handle, p->is32, m.name);
+
+    // the fixed-base swap for a DLL target can end now that the loader has
+    // mapped it: the path gets its pristine file back
+    if (dll_patch_.patched && to_lower(m.path) == to_lower(to_utf8(dll_patch_.target)))
+        dll_patch_.revert();
 
     // module-load breakpoints: stop when a watched module shows up
     for (const auto& pat : module_breaks_) {

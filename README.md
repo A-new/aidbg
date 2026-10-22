@@ -11,7 +11,7 @@
 - 错误结构化返回，便于 agent 判断重试或换策略
 
 技术栈：C++20 / MSVC、Zydis 4.1.1（反汇编，与 x64dbg 同款）、DbgHelp（PDB 符号）。
-架构源于多个开源调试器：x64dbg 的命令层与引擎解耦、raddebugger 的模块化引擎、
+架构参考多个开源调试器：x64dbg 的命令层与引擎解耦、raddebugger 的模块化引擎、
 GDB 的请求-响应模型、Z0BDbgCli 的条件断点与异常策略、Nanomite 的状态视图完备性。
 
 ---
@@ -182,7 +182,7 @@ aidbg --mcp
 
 | 命令 | 说明 |
 |---|---|
-| `file <path> [args...]` | 设置待调试程序与参数 |
+| `file <exe> [args...]\|file <dll> [export]` | 设置待调试目标：EXE+参数，或 DLL（自动用内置宿主加载，`export` 为可选的加载后调用入口） |
 | `run [args...]` | 启动并停在 **入口点**（自动跳过 ntdll 加载器断点） |
 | `attach <pid>` | 附加到已运行进程，停在系统断点 |
 | `detach` / `kill` | 干净分离 / 终止目标 |
@@ -257,6 +257,33 @@ x64dbg 的 "Disable ASLR" 走 TitanEngine 的 `UE_ENGINE_DISABLE_ASLR`，底层�
 
 `session.processes` 字段给出当前会话的进程数（>1 时出现）。子进程自己的加载器断点
 （ntdll / WOW64 层）会自动跳过，只有你设的断点才会停。
+
+固定基址对**不可改名的目标自动回退**：系统文件（`%SystemRoot%` 下）从不参与改名交换，
+权限等原因导致交换失败时也会退回 ASLR 启动并给出提示，`modules` 的 `slide` 会显示实际
+偏移——不会像旧版本那样直接报错终止。
+
+### 调试 DLL 目标
+
+DLL 不能直接创建为进程，`file <dll>` 时 aidbg 会从自身资源释放一个**内置宿主 stub**
+（x86/x64 各一份，按 DLL 的机器类型选择）来加载它：
+
+```
+file sample_dll.dll SampleEntry    # 第二个参数 = 加载后要调用的导出（可省略）
+run
+```
+
+`run` 之后的自动断点链（全部可再 `bc` 删掉）：
+
+1. 宿主入口（默认的入口停点）
+2. **目标 DLL 加载**（自动 `bpload`）——固定基址对 DLL 同样生效，停点处基址即 PE ImageBase
+3. **DLL 入口（DllMain）**——自动按 `dll+0x<入口RVA>` 设待定断点，加载即解析
+
+之后与其他目标无异：`break sample_dll!Func`、寄存器、内存、快照、`hide` 反反调试全部可用。
+不给 `export` 时宿主只 `LoadLibrary` 并保持 DLL 映射（适合研究 DllMain / 手动控制）；
+给 `export` 时按 rundll32 约定调用 `void WINAPI fn(HWND, HINSTANCE, LPSTR, int)`（x86 导出
+名请用 .def 保持无修饰，否则请直接用断点驱动）。找不到导出时宿主以退出码 3 结束而不是空转。
+
+已运行进程里的 DLL 用 `attach <pid>` + `bpload <dll>` 调试。
 
 ### 4.2 执行控制
 
@@ -873,6 +900,7 @@ aidbg/
       hide.cpp           反反调试（PEB 补丁 + ntdll API 虚拟化 + detect）
       notes.cpp          用户标签/注释（模块+RVA 锚定，JSON 持久化）
       disasm.cpp         Zydis 封装
+    host/                内置 DLL 宿主 stub（dllhost.c，x86/x64）+ 资源嵌入脚本
     util/                JSON 构造/解析、字符串与模式解析
   third_party/zydis/     Zydis 4.1.1 + Zycore
   tests/                 测试目标程序（x64 的 target.exe 与 x86 的 target32.exe）与冒烟脚本
@@ -885,6 +913,7 @@ GitHub Releases 上单独发布对应的 `aidbg.exe`。
 
 | 版本 | 内容 |
 |---|---|
+| 0.3.0 | **直接调试 DLL**：`file <dll> [export]` 用内置宿主加载（x86/x64 双 stub 嵌入 aidbg.exe），自动断点链（DLL 加载 → DllMain），DLL 固定基址同样生效；固定基址对系统文件/不可改名目标自动回退 ASLR 并提示（原先直接报错） |
 | 0.2.1 | 代码审查修复：快照落盘保留 XMM/MXCSR（此前恢复会清零）；断点命中命令禁止执行控制（防事件泵重入）；固定基址崩溃残留自动恢复；同地址用户断点优先于隐藏钩子；透传状态按线程隔离；xmm 输入校验、`bpload add` 参数校验、缓冲写回长度夹紧等小修 |
 | 0.2.0 | 固定基址改为"改名交换"（原始文件字节零修改，自校验探针实测通过）；`label`/`comment`/`notes` 用户笔记（模块+RVA 锚定、JSON 持久化）；`bpcmd` 断点命中命令；`bpload` 模块加载断点；`regs`/`setreg` 支持 XMM/MXCSR；修复 `eval` 把 `x+y` 误判为"模块+偏移" |
 | 0.1.0 | 首个版本：调试核心（断点/单步/内存/寄存器/符号/表达式）、反反调试（`hide`/`detect`）、快照回退、IAT 追踪重建、PE 转储、MCP 服务 |

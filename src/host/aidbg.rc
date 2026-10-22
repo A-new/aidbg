@@ -1,0 +1,9 @@
+// Embedded DLL-host stubs: extracted to %TEMP% at runtime when the target is
+// a DLL. Both architectures are needed - a 64-bit process cannot load a
+// 32-bit DLL. The stubs are built by build.bat into build/host/ before this
+// resource script is compiled (paths are relative to this file).
+#define IDR_DLLHOST64 101
+#define IDR_DLLHOST32 102
+
+IDR_DLLHOST64 RCDATA "../../build/host/dllhost64.exe"
+IDR_DLLHOST32 RCDATA "../../build/host/dllhost32.exe"

@@ -1,0 +1,8 @@
+bpload sample_dll.dll
+break sample_dll!SampleEntry
+run
+continue
+continue
+info
+regs
+kill

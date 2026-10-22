@@ -2498,7 +2498,7 @@ struct CmdSpec {
 
 const CmdSpec kCmds[] = {
     {"help", "", "help", "show this command list", false, false, cmd_help},
-    {"file", "target", "file <path> [args...]", "set the executable to debug", false, false, cmd_file},
+    {"file", "target", "file <exe> [args...] | file <dll> [export]", "set the target to debug: an exe with arguments, or a dll (runs in a built-in host; optional export is called after loading)", false, false, cmd_file},
     {"run", "launch", "run [args...]", "launch the target and break at its entry point", false, false, cmd_run},
     {"attach", "", "attach <pid>", "attach to a running process", false, false, cmd_attach},
     {"detach", "", "detach", "detach from the target, leaving it running", true, false, cmd_detach},
