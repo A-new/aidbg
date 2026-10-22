@@ -2,6 +2,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -163,10 +164,13 @@ private:
     bool enabled_ = true;
     std::vector<ProcessHooks> procs_;
 
-    // pass-through bookkeeping (NtClose on a valid handle executes in place)
-    bool pass_through_ = false;
-    uint64_t pass_addr_ = 0;
-    uint32_t pass_pid_ = 0;
+    // pass-through bookkeeping (NtClose on a valid handle executes in place),
+    // keyed by thread: concurrent hits on different threads must not share it
+    struct PassThrough {
+        uint64_t addr;
+        uint32_t pid;
+    };
+    std::map<uint32_t, PassThrough> pass_;
 };
 
 }  // namespace aj

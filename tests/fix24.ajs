@@ -1,0 +1,7 @@
+hide profile standard
+hide on
+break ntdll!NtClose
+bpcmd 1 continue
+run
+bpcmd 1
+kill

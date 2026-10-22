@@ -135,6 +135,21 @@ bool TransientPePatch::clear_dynamic_base(const std::wstring& path) {
     orig = path + L".aidbg-orig";
     staged = path + L".aidbg-patched";
 
+    // Recover from a previous crash mid-swap: when .aidbg-orig exists it holds
+    // the pristine file and the path may hold a patched copy - without this the
+    // user's file would stay modified forever (and defeat its own self-check).
+    if (GetFileAttributesW(orig.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        DeleteFileW(staged.c_str());
+        MoveFileExW(path.c_str(), staged.c_str(), 0);  // path may be the patched copy
+        if (!MoveFileExW(orig.c_str(), path.c_str(), 0)) {
+            err = fmt("cannot restore the original from %s: %s", to_utf8(orig).c_str(),
+                      last_error_text().c_str());
+            return false;
+        }
+        DeleteFileW(staged.c_str());
+    }
+    DeleteFileW(staged.c_str());
+
     // locate DllCharacteristics without touching the file
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -447,6 +462,10 @@ static void release_all(std::vector<ProcessInfo>& processes) {
 }
 
 bool Engine::detach(std::string& err) {
+    if (in_hit_command_) {
+        err = "detach is not allowed from a breakpoint on-hit command";
+        return false;
+    }
     if (processes_.empty()) {
         err = "no active target";
         return false;
@@ -484,6 +503,10 @@ bool Engine::detach(std::string& err) {
 }
 
 bool Engine::kill(std::string& err) {
+    if (in_hit_command_) {
+        err = "kill is not allowed from a breakpoint on-hit command";
+        return false;
+    }
     if (processes_.empty()) {
         err = "no active target";
         return false;
@@ -916,18 +939,20 @@ void Engine::on_exception(DEBUG_EVENT& ev, bool& stop, DWORD& status) {
 
     // ---- software breakpoint (INT3) ----
     if (norm == EXCEPTION_BREAKPOINT) {
-        // anti-anti-debug hook sites answer the call themselves and the target
-        // keeps running; they must never surface as a breakpoint hit
-        if (hide.on_breakpoint(addr, stop)) {
-            status = kContinue;
-            return;
-        }
+        // a user breakpoint at this address always wins over the hiding hooks:
+        // `break ntdll!NtClose` must still fire when NtClose is hooked
         Breakpoint* bp = bps.at_address(addr);
         if (bp && bp->plant_of(current_pid_).planted) {
             if (handle_software_breakpoint(addr, bp, stop)) {
                 status = kContinue;
                 return;
             }
+            status = kContinue;
+            return;
+        }
+        // anti-anti-debug hook sites answer the call themselves and the target
+        // keeps running; they must never surface as a breakpoint hit
+        if (hide.on_breakpoint(addr, stop)) {
             status = kContinue;
             return;
         }
@@ -1025,7 +1050,11 @@ bool Engine::handle_software_breakpoint(uint64_t addr, Breakpoint* bp, bool& sto
     }
     bp->hit_count++;
     at_bp_id_ = bp_id;
-    if (!bp_command.empty() && command_hook_) command_hook_(bp_command);
+    if (!bp_command.empty() && command_hook_) {
+        in_hit_command_ = true;
+        command_hook_(bp_command);
+        in_hit_command_ = false;
+    }
 
     bool should_stop = true;
     if (!bp_condition.empty()) {
@@ -1083,7 +1112,11 @@ bool Engine::handle_hardware_breakpoint(uint32_t /*tid*/, bool& stop) {
         if (bp.kind != BpKind::Hardware || !bp.enabled) continue;
         bool should_stop = true;
         std::string e;
-        if (!bp.command.empty() && command_hook_) command_hook_(bp.command);
+        if (!bp.command.empty() && command_hook_) {
+            in_hit_command_ = true;
+            command_hook_(bp.command);
+            in_hit_command_ = false;
+        }
         evaluate_condition(bp, should_stop, e);
         bp.hit_count++;
         if (!should_stop) continue;
@@ -1104,7 +1137,11 @@ bool Engine::handle_guard_breakpoint(uint64_t access_addr, bool& stop) {
         if (access_addr < bp.address || access_addr >= bp.address + bp.size) continue;
         std::string e;
         bool should_stop = true;
-        if (!bp.command.empty() && command_hook_) command_hook_(bp.command);
+        if (!bp.command.empty() && command_hook_) {
+            in_hit_command_ = true;
+            command_hook_(bp.command);
+            in_hit_command_ = false;
+        }
         evaluate_condition(bp, should_stop, e);
         bp.hit_count++;
         guard_rearm_id_ = bp.id;  // re-arm after stepping past
@@ -1237,6 +1274,12 @@ bool Engine::snapshot_restore(const std::string& name, std::string& err) {
 
 bool Engine::resume_inner(ResumeAction act, uint64_t until_addr, uint32_t timeout_ms,
                           std::string& err) {
+    if (in_hit_command_) {
+        // resuming from inside a breakpoint on-hit command would re-enter the
+        // debug event pump while its event is still being processed
+        err = "execution control is not allowed from a breakpoint on-hit command";
+        return false;
+    }
     if (!active()) {
         // the handle lingers after EXIT_PROCESS, so check liveness explicitly:
         // stepping a dead debuggee would wait forever for an event that never

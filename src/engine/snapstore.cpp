@@ -51,10 +51,11 @@ bool get_u64(const uint8_t* p, size_t n, size_t& o, uint64_t& v) {
 }
 
 // CpuState is serialized field by field so the file does not depend on struct
-// padding or on this build's ABI.
+// padding or on this build's ABI. Fields appended after the original set are
+// read back only when present, so files written by older builds still load.
 std::vector<uint8_t> serialize_regs(const CpuState& s) {
     std::vector<uint8_t> b;
-    b.reserve(224);
+    b.reserve(512);
     for (int i = 0; i < 16; ++i) put_u64(b, s.gpr[i]);
     put_u64(b, s.rip);
     put_u64(b, s.rflags);
@@ -63,6 +64,10 @@ std::vector<uint8_t> serialize_regs(const CpuState& s) {
     put_u64(b, s.dr6);
     put_u64(b, s.dr7);
     put_u32(b, s.is32 ? 1u : 0u);
+    // v0.2.x: SSE state - without these a restore would zero the target's XMMs
+    put_u32(b, s.mxcsr);
+    for (int i = 0; i < 16; ++i)
+        for (int j = 0; j < 16; ++j) b.push_back(s.xmm[i][j]);
     return b;
 }
 
@@ -84,6 +89,17 @@ bool deserialize_regs(const uint8_t* p, size_t n, CpuState& s) {
     uint32_t is32 = 0;
     if (!get_u32(p, n, o, is32)) return false;
     s.is32 = is32 != 0;
+    // optional tail (records from v0.2.x onward)
+    if (o < n) {
+        uint32_t mx = 0;
+        if (!get_u32(p, n, o, mx)) return true;  // old record: SSE stays zeroed
+        s.mxcsr = mx;
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < 16; ++j) {
+                if (o >= n) return true;
+                s.xmm[i][j] = p[o++];
+            }
+    }
     return true;
 }
 

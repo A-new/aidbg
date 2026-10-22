@@ -502,13 +502,18 @@ CmdResult cmd_setreg(Engine& e, CliConfig&, const std::vector<std::string>& a) {
         // digits, shorter fills the low bytes, the rest is zeroed)
         std::string hs = a[1];
         if (hs.size() > 2 && hs[0] == '0' && (hs[1] == 'x' || hs[1] == 'X')) hs = hs.substr(2);
-        if (hs.empty() || hs.size() > 32 || hs.size() % 2 != 0)
-            return fail("bad_args", "xmm value must be 1..32 hex digits (even count)");
+        if (hs.empty() || hs.size() > 32)
+            return fail("bad_args", "xmm value must be 1..32 hex digits");
+        for (char c : hs) {
+            bool hexc = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                        (c >= 'A' && c <= 'F');
+            if (!hexc) return fail("bad_args", "invalid hex: " + a[1]);
+        }
+        if (hs.size() % 2 != 0) hs = "0" + hs;  // "0" .. "f" set the low byte
         uint8_t bytes[16] = {0};
         for (size_t i = 0; i < hs.size(); i += 2) {
             unsigned b = 0;
-            if (sscanf(hs.c_str() + i, "%2x", &b) != 1)
-                return fail("bad_args", "invalid hex: " + a[1]);
+            sscanf(hs.c_str() + i, "%2x", &b);
             bytes[i / 2] = (uint8_t)b;
         }
         if (!write_xmm(st, xi, bytes)) return fail("bad_register", "no such xmm register: " + a[0]);
@@ -2217,7 +2222,8 @@ CmdResult cmd_bpload(Engine& e, CliConfig&, const std::vector<std::string>& a) {
         Json d = Json::obj();
         return ok(d, fmt("removed module-load breakpoint %s\n", a[1].c_str()));
     }
-    std::string pat = (sub == "add" && a.size() > 1) ? a[1] : a[0];
+    if (sub == "add" && a.size() < 2) return fail("bad_args", "bpload add <pattern>");
+    std::string pat = (sub == "add") ? a[1] : a[0];
     std::string err;
     if (!e.add_module_break(pat, err)) return fail("bad_pattern", err);
     Json d = Json::obj();
@@ -2424,7 +2430,9 @@ CmdResult cmd_hide(Engine& e, CliConfig&, const std::vector<std::string>& a) {
         bool on = v == "1" || v == "true" || v == "on";
         std::string err;
         if (!hide_set_key(e.hide.config(), a[1], on, err)) return fail("bad_key", err);
-        e.hide.apply_config(e.hide.config(), e.hide.profile() + "+custom");
+        std::string pn = e.hide.profile();  // keep the label from growing forever
+        if (pn.find('+') == std::string::npos) pn += "+custom";
+        e.hide.apply_config(e.hide.config(), pn);
         return report_ok("switch set: " + a[1] + (on ? "=on" : "=off"));
     }
 
@@ -2458,7 +2466,9 @@ CmdResult cmd_hide(Engine& e, CliConfig&, const std::vector<std::string>& a) {
         Json rep;
         HideConfig c = e.hide.config();
         if (!hide_load_ini(c, a[1], rep, err)) return fail("load_failed", err);
-        e.hide.apply_config(c, e.hide.profile() + "+ini");
+        std::string pn = e.hide.profile();
+        if (pn.find('+') == std::string::npos) pn += "+ini";
+        e.hide.apply_config(c, pn);
         Json d = e.hide.status_json();
         d.set("ini", rep);
         std::string t = fmt("hide: loaded '%s' (section [%s])\n", a[1].c_str(),

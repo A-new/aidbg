@@ -185,7 +185,9 @@ public:
 
     // On-hit commands (borrowed from Syser's BREAK_POINT::Command): the hook is
     // invoked with the breakpoint's command text at every hit, while the target
-    // is paused and before the stop/continue decision is made.
+    // is paused and before the stop/continue decision is made. Execution
+    // control from inside such a command would re-enter the event pump, so it
+    // is refused (see resume/detach/kill).
     void set_command_hook(std::function<void(const std::string&)> hook) {
         command_hook_ = std::move(hook);
     }
@@ -288,6 +290,7 @@ private:
 
     std::function<void(const std::string&)> command_hook_;  // on-hit commands
     std::vector<std::string> module_breaks_;               // module-load patterns
+    bool in_hit_command_ = false;  // inside an on-hit command callback
 
     // temporary guard re-arm after a memory breakpoint hit
     int guard_rearm_id_ = 0;

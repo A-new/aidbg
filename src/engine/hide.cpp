@@ -984,7 +984,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                         uint64_t one = 1;  // OtherOperationCount
                         memcpy(buf.data() + 8, &one, is32 ? 4 : 8);
                     }
-                    wr_bytes(proc, info, buf.data(), rl ? rl : len);
+                    wr_bytes(proc, info, buf.data(), (rl && rl <= len ? rl : len));
                 }
                 if (retlen_addr) wr_u32(proc, retlen_addr, rl);
                 done(stt);
@@ -1023,7 +1023,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                 if (stt >= 0) {
                     ULONG opts = 1;  // CODEINTEGRITY_OPTION_ENABLED
                     memcpy(buf.data() + 4, &opts, 4);
-                    wr_bytes(proc, info, buf.data(), rl ? rl : len);
+                    wr_bytes(proc, info, buf.data(), (rl && rl <= len ? rl : len));
                 }
                 if (retlen_addr) wr_u32(proc, retlen_addr, rl);
                 done(stt);
@@ -1060,12 +1060,12 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
             LONG stt = pNtQO(local, cls, len ? buf.data() : nullptr, len, &rl);
             CloseHandle(local);
             if (stt >= 0 && len && cls == kObjectTypesInformation) {
-                filter_debug_objects(proc, is32, buf.data(), rl ? rl : len, info, true);
-                wr_bytes(proc, info, buf.data(), rl ? rl : len);
+                filter_debug_objects(proc, is32, buf.data(), (rl && rl <= len ? rl : len), info, true);
+                wr_bytes(proc, info, buf.data(), (rl && rl <= len ? rl : len));
             } else if (stt >= 0 && len && cls == kObjectTypeInformation) {
                 // single OBJECT_TYPE_INFORMATION: relocate its TypeName pointer
                 // the same way and zero DebugObject counts
-                size_t used = rl ? rl : len;
+                size_t used = (rl && rl <= len ? rl : len);
                 uint16_t name_len = 0;
                 if (used >= 16) {
                     memcpy(&name_len, buf.data(), 2);
@@ -1098,7 +1098,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                 }
                 wr_bytes(proc, info, buf.data(), used);
             } else if (stt >= 0 && len) {
-                wr_bytes(proc, info, buf.data(), rl ? rl : len);
+                wr_bytes(proc, info, buf.data(), (rl && rl <= len ? rl : len));
             }
             if (retlen_addr) wr_u32(proc, retlen_addr, rl);
             done(stt);
@@ -1186,9 +1186,7 @@ void Hider::unplant_for_step(ProcessHooks& ph, HookSite& site) {
     wr_bytes(proc, site.address, &site.original, 1);
     flush_icache(proc, site.address, 1);
     site.planted = false;
-    pass_through_ = true;
-    pass_addr_ = site.address;
-    pass_pid_ = ph.pid;
+    pass_[eng_->tid()] = PassThrough{site.address, ph.pid};
     // single step over the real instruction, then re-plant the INT3
     CpuState st;
     std::string e;
@@ -1234,6 +1232,12 @@ void Hider::on_process_exit(uint32_t pid) {
             break;
         }
     }
+    for (auto it = pass_.begin(); it != pass_.end();) {
+        if (it->second.pid == pid)
+            it = pass_.erase(it);
+        else
+            ++it;
+    }
 }
 
 void Hider::unplant_all() {
@@ -1246,7 +1250,7 @@ void Hider::unplant_all() {
         ph->sites.clear();
         ph->planted = false;
     }
-    pass_through_ = false;
+    pass_.clear();
 }
 
 void Hider::reapply() {
@@ -1338,20 +1342,23 @@ bool Hider::on_breakpoint(uint64_t addr, bool& stop) {
 }
 
 bool Hider::on_single_step() {
-    if (!pass_through_) return false;
     Engine* eng = eng_;
-    ProcessHooks* ph = hooks_for(pass_pid_);
-    pass_through_ = false;
+    auto it = pass_.find(eng ? eng->tid() : 0);
+    if (it == pass_.end()) return false;  // not ours: a normal single step
+    uint32_t pid = it->second.pid;
+    uint64_t addr = it->second.addr;
+    pass_.erase(it);
+    ProcessHooks* ph = hooks_for(pid);
     if (!ph) return true;
     HANDLE proc = nullptr;
     for (const ProcessInfo& p : eng->processes())
-        if (p.pid == pass_pid_) {
+        if (p.pid == pid) {
             proc = p.handle;
             break;
         }
     if (!proc) return true;
     for (auto& s : ph->sites) {
-        if (s.address != pass_addr_) continue;
+        if (s.address != addr) continue;
         wr_bytes(proc, s.address, "\xCC", 1);
         flush_icache(proc, s.address, 1);
         s.planted = true;

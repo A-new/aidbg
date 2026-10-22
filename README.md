@@ -594,6 +594,8 @@ aidbg -c "snapshot file session.snap" -c "file a.exe" -c run ...
 - NtQueryObject 的 DebugObject 计数过滤在 WOW64 目标上**不生效**（结构布局随位数变化，
   32 位路径走透传）。
 - 驱动级隐藏（HyperHide/TitanHide 路线）**不做**，aidbg 保持纯用户态单文件。
+- **性能**：L2 钩子每次命中都走一次调试事件往返（几十~几百 µs）。`NtClose` 是高频 API，
+  句柄密集的目标会明显变慢；可 `hide set NtCloseHook 0` 单独关闭（保留其余保护）。
 - `hide off`、`detach`、进程退出都会把 INT3 还原，不会在目标里留下断点字节。
 
 ### 4.9 用户笔记（label / comment）
@@ -883,5 +885,6 @@ GitHub Releases 上单独发布对应的 `aidbg.exe`。
 
 | 版本 | 内容 |
 |---|---|
+| 0.2.1 | 代码审查修复：快照落盘保留 XMM/MXCSR（此前恢复会清零）；断点命中命令禁止执行控制（防事件泵重入）；固定基址崩溃残留自动恢复；同地址用户断点优先于隐藏钩子；透传状态按线程隔离；xmm 输入校验、`bpload add` 参数校验、缓冲写回长度夹紧等小修 |
 | 0.2.0 | 固定基址改为"改名交换"（原始文件字节零修改，自校验探针实测通过）；`label`/`comment`/`notes` 用户笔记（模块+RVA 锚定、JSON 持久化）；`bpcmd` 断点命中命令；`bpload` 模块加载断点；`regs`/`setreg` 支持 XMM/MXCSR；修复 `eval` 把 `x+y` 误判为"模块+偏移" |
 | 0.1.0 | 首个版本：调试核心（断点/单步/内存/寄存器/符号/表达式）、反反调试（`hide`/`detect`）、快照回退、IAT 追踪重建、PE 转储、MCP 服务 |

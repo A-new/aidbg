@@ -1,0 +1,16 @@
+hide profile standard
+hide set NtCloseHook 0
+hide set NtCloseHook 1
+run
+snapshot file snap_test.bin
+setreg xmm0 00112233445566778899aabbccddeeff
+setreg mxcsr 0x1F80
+snapshot save t1
+snapshot history
+setreg xmm0 0
+snapshot load 1
+regs xmm0
+regs mxcsr
+setreg xmm3 1z
+bpload add
+kill
