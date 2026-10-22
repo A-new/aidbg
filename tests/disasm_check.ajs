@@ -1,0 +1,4 @@
+run
+disasm 0x7ffa4fedd3df 4
+disasm 0x7ffa50022060 4
+kill

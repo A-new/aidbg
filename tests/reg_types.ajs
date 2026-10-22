@@ -1,0 +1,7 @@
+run
+ptype Node
+whatis g_head
+print g_head
+snapshot save t1
+snapshot list
+kill

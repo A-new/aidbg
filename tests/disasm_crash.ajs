@@ -1,0 +1,6 @@
+hide profile standard
+hide on
+run
+disasm 0x7ffa50027552 8
+stack 8
+kill

@@ -1,0 +1,6 @@
+hide profiles
+hide profile vmp
+hide save hide_test.ini
+hide profile off
+hide load hide_test.ini
+hide status

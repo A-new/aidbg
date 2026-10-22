@@ -1,0 +1,8 @@
+hide profile off
+hide set NtQueryInformationProcessHook 1
+hide set NtCloseHook 1
+hide on
+run
+hide hooks
+continue 8000
+hide hooks

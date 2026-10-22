@@ -1,0 +1,6 @@
+hide profile off
+hide set NtCloseHook 1
+hide on
+run
+exall on
+continue 10000

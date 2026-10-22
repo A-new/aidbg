@@ -1,0 +1,6 @@
+hide profile standard
+hide set FakeParentProcess 0
+hide on
+run
+exall on
+continue 15000

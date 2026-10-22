@@ -1,0 +1,12 @@
+run
+label $entry entry_point
+comment $entry program starts here
+eval entry_point
+break entry_point
+disasm $entry 3
+notes
+notes save notes_test.json
+notes clear
+notes load notes_test.json
+notes
+kill

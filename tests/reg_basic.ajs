@@ -1,0 +1,7 @@
+run
+regs
+stack 3
+modules
+peb
+hide hooks
+kill

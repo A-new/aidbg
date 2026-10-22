@@ -1,0 +1,5 @@
+run
+exall on
+hide hooks
+continue 15000
+info

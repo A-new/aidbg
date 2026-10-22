@@ -1,0 +1,9 @@
+run
+regs xmm0
+setreg xmm0 00112233445566778899aabbccddeeff
+regs xmm0
+setreg xmm3 aabbccdd
+regs xmm3
+setreg mxcsr 0x1F80
+regs mxcsr
+kill

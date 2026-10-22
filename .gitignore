@@ -1,0 +1,19 @@
+# build output
+/build/
+*.obj
+*.ilk
+*.pdb
+
+# test run artifacts
+*.log
+*.err
+tests/out_*.txt
+tests/probe_*.txt
+tests/probe_out*.txt
+tests/notes_test.json
+tests/hide_test.ini
+tests/dumped.exe
+tests/*.noaslr.exe
+
+# local notes / scratch
+*.aidbg-notes.json

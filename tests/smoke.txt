@@ -1,0 +1,10 @@
+# aidbg script-mode smoke test
+# run with: aidbg --script tests\smoke.txt --json
+file tests/target.exe
+run
+break accumulate
+continue
+regs rax rcx rip
+eval accumulate+0x4
+mem g_counter 4
+kill

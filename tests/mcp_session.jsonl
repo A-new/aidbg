@@ -1,0 +1,11 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"aidbg_session","arguments":{"action":"file","exe":"tests/target32.exe"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"aidbg_session","arguments":{"action":"run"}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"aidbg_breakpoint","arguments":{"action":"add","symbol":"accumulate"}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"aidbg_execute","arguments":{"action":"continue"}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"aidbg_registers","arguments":{"action":"read","names":["ecx","eip"]}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"aidbg_stack","arguments":{"max":3}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"aidbg_eval","arguments":{"expression":"[esp]"}}}
+{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"aidbg_session","arguments":{"action":"kill"}}}

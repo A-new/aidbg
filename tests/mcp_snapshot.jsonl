@@ -1,0 +1,12 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aidbg_session","arguments":{"action":"file","exe":"tests/target.exe"}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"aidbg_breakpoint","arguments":{"action":"add","symbol":"accumulate"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"aidbg_session","arguments":{"action":"run"}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"aidbg_execute","arguments":{"action":"continue"}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"aidbg_snapshot","arguments":{"action":"save","name":"before"}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"aidbg_execute","arguments":{"action":"continue"}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"aidbg_memory","arguments":{"action":"read","address":"g_counter","size":4}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"aidbg_snapshot","arguments":{"action":"stepback","count":1}}}
+{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"aidbg_memory","arguments":{"action":"read","address":"g_counter","size":4}}}
+{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"aidbg_snapshot","arguments":{"action":"list"}}}
+{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"aidbg_session","arguments":{"action":"kill"}}}

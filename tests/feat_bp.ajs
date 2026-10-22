@@ -1,0 +1,10 @@
+bpload kernel32.dll
+run
+info
+continue
+break accumulate
+bpcmd 2 eval 2+2
+continue
+bpcmd
+bl
+kill

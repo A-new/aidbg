@@ -1,0 +1,8 @@
+eval 2+2
+eval 10*3+5
+run
+eval rip+4
+break accumulate
+bpcmd 2 eval 2+2
+continue
+continue

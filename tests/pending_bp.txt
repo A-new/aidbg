@@ -1,0 +1,6 @@
+file tests\target32.exe
+break main
+bl
+run
+bl
+kill

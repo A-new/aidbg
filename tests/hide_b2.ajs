@@ -1,0 +1,8 @@
+hide profile off
+hide set NtQueryInformationProcessHook 1
+hide set NtQuerySystemInformationHook 1
+hide set NtQueryObjectHook 1
+hide on
+run
+exall on
+continue 10000

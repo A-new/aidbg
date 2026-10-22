@@ -1,0 +1,7 @@
+run
+hide hooks
+continue 2000
+regs
+stack 6
+hide hooks
+info

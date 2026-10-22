@@ -1,0 +1,5 @@
+hide profile basic
+hide on
+run
+exall on
+continue 10000
