@@ -8,6 +8,7 @@
 #include "engine/cfg.h"
 #include "engine/disasm.h"
 #include "engine/exports.h"
+#include "util/version.h"
 #include "engine/importfix.h"
 #include "engine/ntview.h"
 #include "engine/pedump.h"
@@ -201,7 +202,7 @@ CmdResult cmd_aslr(Engine& e, CliConfig& cfg, const std::vector<std::string>& a)
 
 CmdResult cmd_info(Engine& e, CliConfig& cfg, const std::vector<std::string>&) {
     Json d = Json::obj();
-    d.set_str("version", "aidbg 0.1.0");
+    d.set_str("version", "aidbg " AIDBG_VERSION);
     d.set_str("exe", cfg.exe);
     d.set_str("args", cfg.args);
     d.set_bool("target_active", e.active());
@@ -212,7 +213,8 @@ CmdResult cmd_info(Engine& e, CliConfig& cfg, const std::vector<std::string>&) {
     d.set_u("modules", e.modules().size());
     d.set_u("threads", e.threads().size());
     d.set_u("breakpoints", e.bps.all().size());
-    std::string t = fmt("aidbg 0.1.0 | target: %s %s\n", cfg.exe.c_str(), cfg.args.c_str());
+    std::string t = fmt("aidbg " AIDBG_VERSION " | target: %s %s\n", cfg.exe.c_str(),
+                        cfg.args.c_str());
     if (e.active()) t += fmt("arch=%s\n", e.arch_text());
     t += fmt("pid=%u tid=%u modules=%zu threads=%zu breakpoints=%zu\n", e.pid(), e.tid(),
              e.modules().size(), e.threads().size(), e.bps.all().size());
@@ -222,10 +224,10 @@ CmdResult cmd_info(Engine& e, CliConfig& cfg, const std::vector<std::string>&) {
 
 CmdResult cmd_version(Engine&, CliConfig&, const std::vector<std::string>&) {
     Json d = Json::obj();
-    d.set_str("version", "0.1.0");
+    d.set_str("version", AIDBG_VERSION);
     d.set_str("disasm", "Zydis 4.1.1");
     d.set_str("symbols", "DbgHelp");
-    return ok(d, "aidbg 0.1.0 (Zydis 4.1.1, DbgHelp)\n");
+    return ok(d, "aidbg " AIDBG_VERSION " (Zydis 4.1.1, DbgHelp)\n");
 }
 
 // --------------------------------------------------------------- execution

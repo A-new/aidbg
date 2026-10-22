@@ -9,6 +9,7 @@
 #include "util/json.h"
 #include "util/json_parse.h"
 #include "util/strutil.h"
+#include "util/version.h"
 
 namespace aj {
 namespace {
@@ -586,7 +587,7 @@ int run_mcp_server(CliConfig& cfg) {
             caps.set("tools", Json::obj());
             Json info = Json::obj();
             info.set_str("name", "aidbg");
-            info.set_str("version", "0.1.0");
+            info.set_str("version", AIDBG_VERSION);
 
             Json result = Json::obj();
             result.set_str("protocolVersion", client_version);

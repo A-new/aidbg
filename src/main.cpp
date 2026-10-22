@@ -13,12 +13,13 @@
 #include "mcp/mcp_server.h"
 #include "output/output.h"
 #include "util/strutil.h"
+#include "util/version.h"
 
 namespace {
 
 void print_usage() {
     std::printf(
-        "aidbg 0.1.0 - AI-first command line debugger for Windows x64\n"
+        "aidbg " AIDBG_VERSION " - AI-first command line debugger for Windows x64\n"
         "\n"
         "usage: aidbg [options] [command...]\n"
         "\n"
@@ -99,7 +100,7 @@ int main(int argc, char** argv) {
             print_usage();
             return 0;
         } else if (a == "--version") {
-            std::printf("aidbg 0.1.0\n");
+            std::printf("aidbg " AIDBG_VERSION "\n");
             return 0;
         } else if (a == "--json") {
             cfg.json = true;
@@ -221,7 +222,7 @@ int main(int argc, char** argv) {
 
     bool interactive = (GetConsoleWindow() != nullptr) && _isatty(_fileno(stdin));
     if (interactive && !cfg.json) {
-        std::printf("aidbg 0.1.0 - type 'help' for commands, 'quit' to exit\n");
+        std::printf("aidbg " AIDBG_VERSION " - type 'help' for commands, 'quit' to exit\n");
     }
 
     std::string line;

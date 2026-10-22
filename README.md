@@ -875,3 +875,13 @@ aidbg/
   third_party/zydis/     Zydis 4.1.1 + Zycore
   tests/                 测试目标程序（x64 的 target.exe 与 x86 的 target32.exe）与冒烟脚本
 ```
+
+## 版本历史
+
+版本号以 `src/util/version.h` 为唯一来源，**每次发布递增**（不再复用旧版本号），并在
+GitHub Releases 上单独发布对应的 `aidbg.exe`。
+
+| 版本 | 内容 |
+|---|---|
+| 0.2.0 | 固定基址改为"改名交换"（原始文件字节零修改，自校验探针实测通过）；`label`/`comment`/`notes` 用户笔记（模块+RVA 锚定、JSON 持久化）；`bpcmd` 断点命中命令；`bpload` 模块加载断点；`regs`/`setreg` 支持 XMM/MXCSR；修复 `eval` 把 `x+y` 误判为"模块+偏移" |
+| 0.1.0 | 首个版本：调试核心（断点/单步/内存/寄存器/符号/表达式）、反反调试（`hide`/`detect`）、快照回退、IAT 追踪重建、PE 转储、MCP 服务 |
