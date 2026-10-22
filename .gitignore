@@ -3,6 +3,12 @@
 *.obj
 *.ilk
 *.pdb
+*.exp
+*.lib
+
+# fixed-base swap leftovers (crash or in-flight launch artifacts)
+*.aidbg-patched
+*.aidbg-orig
 
 # test run artifacts
 *.log
