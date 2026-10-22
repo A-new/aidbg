@@ -11,7 +11,7 @@
 - 错误结构化返回，便于 agent 判断重试或换策略
 
 技术栈：C++20 / MSVC、Zydis 4.1.1（反汇编，与 x64dbg 同款）、DbgHelp（PDB 符号）。
-架构取自本目录多个开源调试器：x64dbg 的命令层与引擎解耦、raddebugger 的模块化引擎、
+架构源于多个开源调试器：x64dbg 的命令层与引擎解耦、raddebugger 的模块化引擎、
 GDB 的请求-响应模型、Z0BDbgCli 的条件断点与异常策略、Nanomite 的状态视图完备性。
 
 ---
