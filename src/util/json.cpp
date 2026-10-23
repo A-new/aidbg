@@ -21,8 +21,9 @@ Json Json::i(int64_t v) {
 }
 Json Json::u(uint64_t v) {
     Json j;
-    // keep exactness: values beyond 2^53 are emitted as hex strings
-    if (v > 9007199254740991ULL) return Json::hex(v);
+    // Always a real JSON number. Addresses that must stay exact go through
+    // set_hex()/Json::hex(); turning large uints into "0x..." here broke
+    // JSON-RPC ids and set_u("value_dec") (the field claimed to be decimal).
     j.type_ = Type::UInt;
     j.u_ = v;
     return j;
@@ -122,6 +123,14 @@ uint64_t Json::as_u(uint64_t fallback) const {
             uint64_t v = 0;
             return parse_u64(s_, v) ? v : fallback;
         }
+        default: return fallback;
+    }
+}
+
+int64_t Json::as_i(int64_t fallback) const {
+    switch (type_) {
+        case Type::Int: return i_;
+        case Type::UInt: return (int64_t)u_;
         default: return fallback;
     }
 }

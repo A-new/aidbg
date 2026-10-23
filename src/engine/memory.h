@@ -18,8 +18,14 @@ struct MemRegion {
     std::string module;
 };
 
+// Reads up to n bytes. Returns true when at least one byte was read; `got`
+// (when given) receives the exact count. Code that requires the whole range
+// must check got == n or call read_memory_exact - reading a header from a
+// partially mapped page otherwise leaves uninitialised bytes in the struct.
 bool read_memory(HANDLE proc, uint64_t addr, void* buf, size_t n, std::string& err,
                  size_t* got = nullptr);
+// Returns true only when all n bytes were read.
+bool read_memory_exact(HANDLE proc, uint64_t addr, void* buf, size_t n, std::string& err);
 bool write_memory(HANDLE proc, uint64_t addr, const void* buf, size_t n, std::string& err);
 bool read_u64(HANDLE proc, uint64_t addr, uint64_t& out, std::string& err);
 bool flush_icache(HANDLE proc, uint64_t addr, size_t n);

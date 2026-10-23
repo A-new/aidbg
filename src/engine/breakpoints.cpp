@@ -52,14 +52,54 @@ Breakpoint* Breakpoints::at_address(uint64_t addr) {
     return nullptr;
 }
 
-bool Breakpoints::plant_software(HANDLE proc, uint32_t pid, Breakpoint& bp, std::string& err) {
+Breakpoint* Breakpoints::at_address_for_pid(uint64_t addr, uint32_t pid) {
+    for (auto& b : list_) {
+        if (!b.enabled || b.kind != BpKind::Software) continue;
+        auto it = b.plants.find(pid);
+        uint64_t a = (it != b.plants.end() && it->second.address) ? it->second.address : b.address;
+        if (a == addr) return &b;
+    }
+    return nullptr;
+}
+
+bool Breakpoints::has_address(uint64_t addr) const {
+    for (const auto& b : list_)
+        if (b.enabled && b.kind == BpKind::Software && b.address == addr) return true;
+    return false;
+}
+
+void Breakpoints::forget_plants() {
+    for (auto& b : list_) {
+        b.plants.clear();
+        b.slot = -1;
+    }
+}
+
+bool Breakpoints::plant_software(HANDLE proc, uint32_t pid, Breakpoint& bp, std::string& err,
+                                 uint64_t addr) {
     BpPlant& pl = bp.plant_of(pid);
+    if (!addr) addr = bp.address;
+    pl.address = addr;
     if (pl.planted) return true;
+    // Several breakpoints may occupy the same byte (a temporary step-over next
+    // to a user breakpoint, or a duplicate). The first one owns the original
+    // instruction byte; the others must not read the planted 0xCC as it.
+    for (auto& other : list_) {
+        if (&other == &bp || other.kind != BpKind::Software) continue;
+        auto it = other.plants.find(pid);
+        if (it == other.plants.end() || !it->second.planted) continue;
+        uint64_t oa = it->second.address ? it->second.address : other.address;
+        if (oa != addr) continue;
+        pl.original_byte = it->second.original_byte;
+        pl.planted = true;
+        pl.present = true;
+        return true;
+    }
     uint8_t orig = 0;
-    if (!read_memory(proc, bp.address, &orig, 1, err)) return false;
+    if (!read_memory(proc, addr, &orig, 1, err)) return false;
     uint8_t cc = 0xCC;
-    if (!write_memory(proc, bp.address, &cc, 1, err)) return false;
-    flush_icache(proc, bp.address, 1);
+    if (!write_memory(proc, addr, &cc, 1, err)) return false;
+    flush_icache(proc, addr, 1);
     pl.original_byte = orig;
     pl.planted = true;
     pl.present = true;
@@ -69,8 +109,23 @@ bool Breakpoints::plant_software(HANDLE proc, uint32_t pid, Breakpoint& bp, std:
 bool Breakpoints::unplant_software(HANDLE proc, uint32_t pid, Breakpoint& bp, std::string& err) {
     BpPlant& pl = bp.plant_of(pid);
     if (!pl.planted) return true;
-    if (!write_memory(proc, bp.address, &pl.original_byte, 1, err)) return false;
-    flush_icache(proc, bp.address, 1);
+    uint64_t addr = pl.address ? pl.address : bp.address;
+    // Keep the INT3 byte while another breakpoint still needs it.
+    bool shared = false;
+    for (auto& other : list_) {
+        if (&other == &bp || other.kind != BpKind::Software) continue;
+        auto it = other.plants.find(pid);
+        if (it == other.plants.end() || !it->second.planted) continue;
+        uint64_t oa = it->second.address ? it->second.address : other.address;
+        if (oa == addr) {
+            shared = true;
+            break;
+        }
+    }
+    if (!shared) {
+        if (!write_memory(proc, addr, &pl.original_byte, 1, err)) return false;
+        flush_icache(proc, addr, 1);
+    }
     pl.planted = false;
     return true;
 }

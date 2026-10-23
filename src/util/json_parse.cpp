@@ -1,5 +1,6 @@
 #include "util/json_parse.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -61,8 +62,26 @@ private:
         }
         char c = peek();
         switch (c) {
-            case '{': return parse_object(out);
-            case '[': return parse_array(out);
+            case '{': {
+                if (depth_ >= kMaxDepth) {
+                    fail("JSON nesting too deep");
+                    return false;
+                }
+                ++depth_;
+                bool ok = parse_object(out);
+                --depth_;
+                return ok;
+            }
+            case '[': {
+                if (depth_ >= kMaxDepth) {
+                    fail("JSON nesting too deep");
+                    return false;
+                }
+                ++depth_;
+                bool ok = parse_array(out);
+                --depth_;
+                return ok;
+            }
             case '"': {
                 std::string v;
                 if (!parse_string(v)) return false;
@@ -88,28 +107,65 @@ private:
     }
 
     bool parse_number(Json& out) {
+        // Strict JSON grammar. The old scan accepted "01", "+1", "1-2" and
+        // let strtoull saturate silently on overflow.
         size_t start = pos_;
         if (peek() == '-') ++pos_;
-        while (!eof() && (std::isdigit((unsigned char)peek()) || peek() == '.' || peek() == 'e' ||
-                          peek() == 'E' || peek() == '+' || peek() == '-'))
-            ++pos_;
-        if (pos_ == start) {
-            fail("invalid value");
+        if (eof() || !std::isdigit((unsigned char)peek())) {
+            fail("invalid number");
             return false;
         }
+        if (peek() == '0') {
+            ++pos_;
+        } else {
+            while (!eof() && std::isdigit((unsigned char)peek())) ++pos_;
+        }
+        bool is_float = false;
+        if (peek() == '.') {
+            is_float = true;
+            ++pos_;
+            if (eof() || !std::isdigit((unsigned char)peek())) {
+                fail("invalid number (fraction)");
+                return false;
+            }
+            while (!eof() && std::isdigit((unsigned char)peek())) ++pos_;
+        }
+        if (peek() == 'e' || peek() == 'E') {
+            is_float = true;
+            ++pos_;
+            if (peek() == '+' || peek() == '-') ++pos_;
+            if (eof() || !std::isdigit((unsigned char)peek())) {
+                fail("invalid number (exponent)");
+                return false;
+            }
+            while (!eof() && std::isdigit((unsigned char)peek())) ++pos_;
+        }
         std::string tok = s_.substr(start, pos_ - start);
-        bool is_float = tok.find_first_of(".eE") != std::string::npos;
+        char* end = nullptr;
+        errno = 0;
         if (is_float) {
-            out = Json::d(std::strtod(tok.c_str(), nullptr));
+            double d = std::strtod(tok.c_str(), &end);
+            if (!end || *end || errno == ERANGE) {
+                fail("number out of range");
+                return false;
+            }
+            out = Json::d(d);
             return true;
         }
         // integer: pick the narrowest representation that round-trips
-        errno = 0;
         if (tok[0] == '-') {
-            long long v = std::strtoll(tok.c_str(), nullptr, 10);
+            long long v = std::strtoll(tok.c_str(), &end, 10);
+            if (!end || *end || errno == ERANGE) {
+                fail("number out of range");
+                return false;
+            }
             out = Json::i((int64_t)v);
         } else {
-            unsigned long long v = std::strtoull(tok.c_str(), nullptr, 10);
+            unsigned long long v = std::strtoull(tok.c_str(), &end, 10);
+            if (!end || *end || errno == ERANGE) {
+                fail("number out of range");
+                return false;
+            }
             out = Json::u((uint64_t)v);
         }
         return true;
@@ -192,14 +248,26 @@ private:
                 case 'u': {
                     uint32_t cp = 0;
                     if (!parse_hex4(cp)) return false;
-                    // surrogate pair
-                    if (cp >= 0xD800 && cp <= 0xDBFF && pos_ + 6 <= s_.size() &&
-                        s_[pos_] == '\\' && s_[pos_ + 1] == 'u') {
-                        pos_ += 2;
-                        uint32_t lo = 0;
-                        if (!parse_hex4(lo)) return false;
-                        if (lo >= 0xDC00 && lo <= 0xDFFF)
-                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    // Surrogate pair. A high surrogate followed by a \u escape
+                    // that is not a low surrogate must not swallow that escape;
+                    // lone surrogates become U+FFFD instead of WTF-8 bytes.
+                    if (cp >= 0xD800 && cp <= 0xDBFF) {
+                        bool paired = false;
+                        if (pos_ + 6 <= s_.size() && s_[pos_] == '\\' && s_[pos_ + 1] == 'u') {
+                            size_t save = pos_;
+                            pos_ += 2;
+                            uint32_t lo = 0;
+                            if (!parse_hex4(lo)) return false;
+                            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                paired = true;
+                            } else {
+                                pos_ = save;  // reparsed as its own escape
+                            }
+                        }
+                        if (!paired) cp = 0xFFFD;
+                    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                        cp = 0xFFFD;
                     }
                     append_utf8(out, cp);
                     break;
@@ -259,8 +327,11 @@ private:
         }
     }
 
+    static constexpr int kMaxDepth = 512;  // well below the thread's stack limit
+
     const std::string& s_;
     size_t pos_ = 0;
+    int depth_ = 0;
     std::string err_;
 };
 

@@ -246,6 +246,12 @@ bool set_state(HANDLE thread, const CpuState& st, std::string& err) {
         wc.Edi = (DWORD)st.gpr[7];
         wc.Eip = (DWORD)st.rip;
         wc.EFlags = (DWORD)st.rflags;
+        wc.SegCs = st.segs[0];
+        wc.SegDs = st.segs[1];
+        wc.SegEs = st.segs[2];
+        wc.SegFs = st.segs[3];
+        wc.SegGs = st.segs[4];
+        wc.SegSs = st.segs[5];
         wc.Dr0 = (DWORD)st.dr[0];
         wc.Dr1 = (DWORD)st.dr[1];
         wc.Dr2 = (DWORD)st.dr[2];
@@ -287,6 +293,12 @@ bool set_state(HANDLE thread, const CpuState& st, std::string& err) {
     c.R15 = st.gpr[15];
     c.Rip = st.rip;
     c.EFlags = (DWORD)st.rflags;
+    c.SegCs = st.segs[0];
+    c.SegDs = st.segs[1];
+    c.SegEs = st.segs[2];
+    c.SegFs = st.segs[3];
+    c.SegGs = st.segs[4];
+    c.SegSs = st.segs[5];
     c.Dr0 = st.dr[0];
     c.Dr1 = st.dr[1];
     c.Dr2 = st.dr[2];

@@ -24,6 +24,17 @@ bool read_memory(HANDLE proc, uint64_t addr, void* buf, size_t n, std::string& e
     return done > 0;
 }
 
+bool read_memory_exact(HANDLE proc, uint64_t addr, void* buf, size_t n, std::string& err) {
+    size_t got = 0;
+    if (!read_memory(proc, addr, buf, n, err, &got)) return false;
+    if (got != n) {
+        err = fmt("ReadProcessMemory(%s) returned only %zu of %zu bytes", hex8(addr).c_str(), got,
+                  n);
+        return false;
+    }
+    return true;
+}
+
 bool write_memory(HANDLE proc, uint64_t addr, const void* buf, size_t n, std::string& err) {
     SIZE_T done = 0;
     DWORD old = 0;

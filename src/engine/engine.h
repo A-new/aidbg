@@ -75,6 +75,7 @@ struct ProcessInfo {
     uint64_t entry = 0;
     bool alive = true;
     bool is_child = false;          // spawned by the debuggee, not launched by us
+    bool is_system = false;         // console host / other OS helper, not the target
     int startup_breaks_skipped = 0; // loader breakpoints walked past so far
     std::string exe_name;
     std::string exe_path;
@@ -128,9 +129,11 @@ public:
     // until the loader maps it.
     static bool is_dll_image(const std::wstring& path);
 
+    // OS helpers (conhost.exe) are debugged because DEBUG_PROCESS makes them
+    // inherit the debug object, but they are not part of the user's session.
     bool active() const {
         for (const auto& p : processes_)
-            if (p.alive) return true;
+            if (p.alive && !p.is_system) return true;
         return false;
     }
     bool has_pending() const { return has_pending_; }
@@ -138,7 +141,12 @@ public:
 
     // ---- execution control ----
     bool resume(ResumeAction act, uint64_t until_addr, uint32_t timeout_ms, std::string& err);
+    // Injects a break into the target (DebugBreakProcess). Only queues the
+    // event; the caller still has to pump the debug loop to reach the stop.
     bool interrupt(std::string& err);
+    // interrupt() + wait for the resulting stop. This is the way back from a
+    // `continue <timeout>` that timed out while the target kept running.
+    bool pause(uint32_t timeout_ms, std::string& err);
 
 private:
     bool resume_inner(ResumeAction act, uint64_t until_addr, uint32_t timeout_ms,
@@ -222,6 +230,9 @@ public:
     // ---- snapshots / reverse execution ----
     bool snapshot_save(const std::string& name, std::string& err);
     bool snapshot_restore(const std::string& name, std::string& err);
+    // Same restore discipline (lift/replant breakpoints, park on the restored
+    // RIP) but the pages come from the durable store instead of memory.
+    bool snapshot_restore_from_store(uint32_t id, std::string& err);
     Snapshots snaps;
 
     // ---- import call tracing ----
@@ -254,16 +265,41 @@ private:
     void on_exception(DEBUG_EVENT& ev, bool& stop, DWORD& continue_status);
 
     bool handle_software_breakpoint(uint64_t addr, Breakpoint* bp, bool& stop);
-    bool handle_hardware_breakpoint(uint32_t tid, bool& stop);
-    bool handle_guard_breakpoint(uint64_t access_addr, bool& stop);
+    // Returns true when a matching breakpoint was found (whether or not it
+    // stopped the session); false means the DR6 bit belongs to no live bp.
+    bool handle_hardware_breakpoint(uint32_t tid, uint32_t dr6, bool& stop);
+    // A guard-page exception. `access_kind` is ExceptionInformation[0]
+    // (0 = read, 1 = write, 8 = execute). Returns true when the exception
+    // comes from one of our armed guard regions - whether it stopped the
+    // session (`stop`) or is being stepped past silently with the guard
+    // re-armed afterwards. False means the target installed the guard page
+    // itself and the exception belongs to it.
+    bool handle_guard_breakpoint(uint64_t access_addr, uint32_t access_kind, bool& stop);
     bool evaluate_condition(Breakpoint& bp, bool& should_stop, std::string& err);
 
     bool plant_all_hardware(std::string& err);
-    bool arm_guard(Breakpoint& bp, uint32_t pid, std::string& err);
+    bool arm_guard(Breakpoint& bp, uint32_t pid, std::string& err, uint64_t addr = 0);
     bool disarm_guard(Breakpoint& bp, uint32_t pid);
 
     void resolve_deferred_breakpoints();
     void refresh_threads();
+
+    // Tears the session down: unplants hooks/breakpoints, closes handles,
+    // clears per-session state and releases a pending debug event. The
+    // breakpoint definitions survive so `restart` still has them.
+    void reset_session();
+    bool any_live_target() const;
+    // Snapshot capture must read the real instruction bytes: every planted
+    // INT3 (user software breakpoints and the hider's ntdll hooks) is lifted
+    // for the read and put back afterwards, or a restored 0xCC whose
+    // breakpoint no longer exists would surface as a stray exception.
+    bool capture_clean(const CpuState& st, const std::string& name, std::string& err);
+    // Re-arms every kind of breakpoint after a snapshot overwrote the
+    // process's memory, and parks on a breakpoint at the restored RIP.
+    void finish_snapshot_restore(uint32_t rpid);
+    // Address of `bp` in `p` (symbol breakpoints may resolve differently per
+    // process because private modules can load at different bases).
+    static uint64_t bp_address_for(const Breakpoint& bp, const ProcessInfo& p);
 
     // process lookup helpers
     ProcessInfo* proc_by_pid(uint32_t pid);
@@ -272,12 +308,20 @@ private:
     void sync_thread_handle();
     void pick_live_process();
 
+    // world-stop: while the session is stopped on one process, every thread
+    // of every other debuggee is suspended so agent-side inspection between
+    // commands sees a stable world. Balanced with the resume in
+    // continue_pending(); SuspendThread/ResumeThread are counted, so this is
+    // safe even where the debug machinery already holds a thread.
+    void freeze_world();
+    void thaw_world();
+    bool world_frozen_ = false;
+
     // state
     std::vector<ProcessInfo> processes_;
     uint32_t current_pid_ = 0;
     uint32_t current_tid_ = 0;
     HANDLE thread_handle_ = nullptr;  // handle of the current thread
-    bool follow_children_ = true;
     // DLL target support: extracted host stub and the still-active base swap
     std::wstring dll_host_stub_;
     TransientPePatch dll_patch_;
@@ -304,12 +348,20 @@ private:
 
     // temporary guard re-arm after a memory breakpoint hit
     int guard_rearm_id_ = 0;
+    // execution hardware breakpoint slot disabled for an internal single step
+    int hw_silent_slot_ = -1;
+    // slot of the execution hardware breakpoint the session is parked on
+    int at_hw_slot_ = -1;
 
     // set when a breakpoint condition was false: the next single step is an
     // internal bookkeeping step and must not stop the session
     bool silent_step_ = false;
 
     bool symbols_ready_ = false;
+
+    // pid of the process Engine::pause injected DebugBreakProcess into: its
+    // breakpoint must surface even while child loader breaks are being skipped
+    uint32_t expecting_break_pid_ = 0;
 };
 
 }  // namespace aj

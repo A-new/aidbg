@@ -306,7 +306,9 @@ bool eval_expr(const std::string& text, const EvalContext& ctx, uint64_t& out,
         return false;
     }
     Parser p(t, ctx);
-    return p.parse(out);
+    bool ok = p.parse(out);
+    if (!ok && err.empty()) err = p.err.empty() ? "invalid expression" : p.err;
+    return ok;
 }
 
 }  // namespace aj

@@ -134,6 +134,16 @@ public:
     void on_process_exit(uint32_t pid);
     void reapply();  // re-run L1 and re-plant hooks in every process
     void unplant_all();  // remove every hook byte (detach safety)
+    void reset();        // forget all per-process state (session teardown)
+
+    // ---- snapshot capture support ----
+    // Lifts every planted hook byte of `pid` so a snapshot reads the real
+    // instruction bytes (a captured 0xCC would come back as a stray
+    // breakpoint). replant_after_capture() puts the lifted bytes back; a site
+    // whose address a user breakpoint took over in the meantime stays lifted,
+    // matching plant()'s "user breakpoint owns the byte" rule.
+    void lift_for_capture(uint32_t pid);
+    void replant_after_capture(uint32_t pid);
 
     // Returns true when the breakpoint belongs to the hiding subsystem and has
     // been fully handled (the target keeps running, `stop` is set false).
@@ -149,11 +159,14 @@ public:
 
 private:
     ProcessHooks* hooks_for(uint32_t pid);
+    HANDLE proc_of(uint32_t pid) const;
     bool plant(ProcessHooks& ph, HANDLE proc, std::string& err);
     void unplant(ProcessHooks& ph, HANDLE proc);
     // restore the original byte and single step so the real instruction runs in
-    // the target (used when the call cannot be emulated from outside)
-    void unplant_for_step(ProcessHooks& ph, HookSite& site);
+    // the target (used when the call cannot be emulated from outside). Returns
+    // false when the byte or the thread state could not be restored; the
+    // caller must then surface the exception instead of continuing.
+    bool unplant_for_step(ProcessHooks& ph, HookSite& site);
     // one per-process L1 pass; `report` collects what was changed
     void apply_l1(uint32_t pid, HANDLE proc, bool is32, Json& report);
     bool emulate(ProcessHooks& ph, HookSite& site, bool& stop);
@@ -163,6 +176,8 @@ private:
     std::string profile_ = "standard";
     bool enabled_ = true;
     std::vector<ProcessHooks> procs_;
+    // addresses lifted by the current lift_for_capture()/replant pair
+    std::vector<uint64_t> capture_lifted_;
 
     // pass-through bookkeeping (NtClose on a valid handle executes in place),
     // keyed by thread: concurrent hits on different threads must not share it

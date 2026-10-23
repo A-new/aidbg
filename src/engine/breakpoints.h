@@ -22,6 +22,10 @@ struct BpPlant {
     bool present = false;         // known to this process
     bool planted = false;         // software: INT3 written / memory: guard armed
     uint8_t original_byte = 0;
+    // Address actually used in this process. Symbol breakpoints resolve per
+    // process (private modules can be loaded at a different base), so this can
+    // differ from Breakpoint::address.
+    uint64_t address = 0;
     uint64_t region_base = 0;     // memory breakpoint
     size_t region_size = 0;
     DWORD region_protect = 0;
@@ -77,13 +81,23 @@ public:
     bool set_enabled(int id, bool enabled, std::string& err);
     Breakpoint* find(int id);
     Breakpoint* at_address(uint64_t addr);
+    // Like at_address, but uses the address actually planted in `pid`
+    // (symbol breakpoints may live at a different address in each process).
+    Breakpoint* at_address_for_pid(uint64_t addr, uint32_t pid);
+    // True when any enabled software breakpoint occupies `addr`.
+    bool has_address(uint64_t addr) const;
+    // Drops per-process planting state (end of a session). The breakpoint
+    // definitions themselves survive so `restart` keeps them.
+    void forget_plants();
     void clear() { list_.clear(); }
 
     std::vector<Breakpoint>& all() { return list_; }
     const std::vector<Breakpoint>& all() const { return list_; }
 
-    // Software breakpoint planting, scoped to one process.
-    bool plant_software(HANDLE proc, uint32_t pid, Breakpoint& bp, std::string& err);
+    // Software breakpoint planting, scoped to one process. `addr` overrides
+    // bp.address (0 = use bp.address).
+    bool plant_software(HANDLE proc, uint32_t pid, Breakpoint& bp, std::string& err,
+                        uint64_t addr = 0);
     bool unplant_software(HANDLE proc, uint32_t pid, Breakpoint& bp, std::string& err);
 
     Json to_json() const;

@@ -24,6 +24,7 @@ struct SnapRecord {
     uint64_t stored_size = 0;
     uint32_t payload_crc = 0;
     std::vector<uint8_t> payload;
+    uint64_t file_offset = 0;   // where this record starts in the container
     bool deleted = false;       // only meaningful after loading
 
     bool is_full() const { return kind == 0; }
@@ -60,8 +61,6 @@ public:
 
     // Appends one record and returns its id.
     bool append(SnapRecord rec, std::string& err);
-    // Replaces the record with the same id (used when re-basing a delta chain).
-    bool update(const SnapRecord& rec, std::string& err);
 
     const std::vector<SnapRecord>& records() const { return recs_; }
     std::vector<SnapRecord>& records() { return recs_; }
@@ -69,7 +68,7 @@ public:
     size_t count() const { return recs_.size(); }
     uint64_t next_id() const { return next_id_; }
 
-    // Marks a record dead; space is reclaimed by compact().
+    // Marks a record dead in the file; space is reclaimed by compact().
     bool mark_deleted(uint32_t id, std::string& err);
 
     // Rewrites the file without dead records. Returns bytes reclaimed.

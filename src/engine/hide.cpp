@@ -84,6 +84,12 @@ constexpr ULONG kSystemCodeIntegrityUnlockInformation = 190;
 constexpr ULONG kObjectTypesInformation = 3;  // NtQueryObject: all types
 constexpr ULONG kObjectTypeInformation = 2;   // NtQueryObject: one handle's type
 constexpr ULONG kObjectHandleFlagInformation = 4;
+constexpr ULONG kObjectNameInformation = 1;
+constexpr ULONG kObjectBasicInformation = 0;
+
+// CONTEXT.ContextFlags offset: x64 keeps P1Home..P3Home first, WOW64 starts
+// with ContextFlags at 0.
+constexpr uint64_t kContextFlagsOffset64 = 0x30;
 
 // heap debug flags (ScyllaHide's PebHider masks, values verified in winnt.h)
 constexpr uint32_t kHeapClearableFlags = 0x780000E0;
@@ -184,7 +190,11 @@ uint32_t explorer_pid() {
 // target's process handle behind the engine's back).
 HANDLE dup_arg_handle(Engine* eng, uint64_t hval, bool is32, bool thread) {
     if (is32) hval &= 0xFFFFFFFFull;
-    uint64_t pseudo = thread ? (is32 ? 0xFFFFFFFEull : ~0ull) : (is32 ? 0xFFFFFFFFull : ~0ull);
+    // NtCurrentThread is -2, NtCurrentProcess is -1. Using ~0ull (= -1) for
+    // the thread meant GetThreadContext(GetCurrentThread()) was never
+    // virtualized.
+    uint64_t pseudo = thread ? (is32 ? 0xFFFFFFFEull : (uint64_t)(int64_t)-2)
+                             : (is32 ? 0xFFFFFFFFull : (uint64_t)(int64_t)-1);
     HANDLE out = nullptr;
     if (hval == pseudo) {
         HANDLE src = thread ? eng->thread() : eng->process();
@@ -548,6 +558,10 @@ bool Hider::plant(ProcessHooks& ph, HANDLE proc, std::string& err) {
                 for (const auto& s : ph.sites)
                     if (s.address == addr) dup = true;
                 if (dup) continue;
+                // A user breakpoint owns this byte. Planting on top would
+                // store its 0xCC as our "original" and the two subsystems
+                // would corrupt each other on unplant.
+                if (eng->bps.has_address(addr)) continue;
                 uint8_t orig = 0;
                 if (!rd_bytes(proc, addr, &orig, 1)) continue;
                 if (!wr_bytes(proc, addr, "\xCC", 1)) continue;
@@ -571,12 +585,34 @@ bool Hider::plant(ProcessHooks& ph, HANDLE proc, std::string& err) {
 }
 
 void Hider::unplant(ProcessHooks& ph, HANDLE proc) {
+    Engine* eng = eng_;
     for (auto& s : ph.sites) {
         if (!s.planted) continue;
-        wr_bytes(proc, s.address, &s.original, 1);
+        // A user breakpoint may share this byte. Hand it the real original
+        // byte and leave the 0xCC in place: Breakpoints then restores the
+        // instruction when the user breakpoint itself goes away. This keeps
+        // the byte correct regardless of which subsystem planted first.
+        Breakpoint* bp = eng ? eng->bps.at_address_for_pid(s.address, ph.pid) : nullptr;
+        if (bp) {
+            auto it = bp->plants.find(ph.pid);
+            if (it != bp->plants.end() && it->second.planted) {
+                if (it->second.original_byte == 0xCC) it->second.original_byte = s.original;
+                s.planted = false;
+                continue;
+            }
+        }
+        // If the write fails the INT3 is still there; keep the state truthful
+        // instead of pretending the hook is gone (detach would leave 0xCC in
+        // the target).
+        if (!wr_bytes(proc, s.address, &s.original, 1)) continue;
         flush_icache(proc, s.address, 1);
         s.planted = false;
     }
+}
+
+void Hider::reset() {
+    procs_.clear();
+    pass_.clear();
 }
 
 // ============================================================== L1 patches
@@ -833,7 +869,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                 done(kStatusSuccess);  // swallow: the thread stays debuggable
             } else {
                 // let the real call run in the target's context
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             }
             break;
@@ -845,7 +881,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                 // record and accept: the target believes the setting stuck
                 done(kStatusSuccess);
             } else {
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             }
             break;
@@ -874,7 +910,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
             CloseHandle(local);
             // close must happen in the target's handle table: replay the real
             // instruction under a single step
-            unplant_for_step(ph, site);
+            if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
             break;
         }
         case HookApi::NtQueryInformationProcess: {
@@ -882,16 +918,20 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
             uint64_t info = arg_ptr(is32, a[2]);
             ULONG len = (ULONG)a[3];
             uint64_t retlen_addr = arg_ptr(is32, a[4]);
-            if (cls == kProcessDebugPort) {
-                uint64_t zero = 0;
-                wr_bytes(proc, info, &zero, is32 ? 4 : 8);
-                if (retlen_addr) wr_u32(proc, retlen_addr, is32 ? 4 : 8);
-                done(kStatusSuccess);
-            } else if (cls == kProcessDebugObjectHandle) {
-                uint64_t zero = 0;
-                wr_bytes(proc, info, &zero, is32 ? 4 : 8);
-                if (retlen_addr) wr_u32(proc, retlen_addr, is32 ? 4 : 8);
-                done(kStatusPortNotSet);  // exactly what a non-debugged run sees
+            if (cls == kProcessDebugPort || cls == kProcessDebugObjectHandle) {
+                // The answer is one pointer-sized value. The real call fails
+                // with INFO_LENGTH_MISMATCH when the caller's buffer is
+                // smaller than that; writing it anyway would overflow a
+                // target-controlled buffer.
+                const ULONG need = is32 ? 4 : 8;
+                if (info && len >= need) {
+                    uint64_t zero = 0;
+                    wr_bytes(proc, info, &zero, need);
+                    if (retlen_addr) wr_u32(proc, retlen_addr, need);
+                    done(cls == kProcessDebugPort ? kStatusSuccess : kStatusPortNotSet);
+                } else {
+                    done(kStatusInfoLengthMismatch);
+                }
             } else if (cls == kProcessDebugFlags) {
                 ULONG one = 1;  // PROCESS_DEBUG_INHERIT: "no debug inherit" clear
                 if (info && len >= 4) wr_bytes(proc, info, &one, 4);
@@ -927,7 +967,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                 if (cfg_.fake_parent && explorer_pid()) parent = explorer_pid();
                 if (!peb32) {
                     // cannot fake a sane answer - let the real call run
-                    unplant_for_step(ph, site);
+                    if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                     return true;
                 }
                 LONG st_pending = 0x103;  // STATUS_PENDING while running
@@ -947,12 +987,12 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
             } else if (is32) {
                 // any other class has an architecture dependent layout; let
                 // the real 32-bit call run instead of forwarding a 64-bit one
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             } else if (cls != kProcessBasicInformation && cls != kProcessIoCounters) {
                 // other classes can return buffers with self-referential
                 // pointers (image names etc.); replay the real call instead
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             } else {
                 // forward the real query through a duplicated handle: both
@@ -960,7 +1000,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                 HANDLE local = dup_arg_handle(eng, a[0], is32, false);
                 if (!local || !pNtQIP || len > (1u << 20)) {
                     if (local) CloseHandle(local);
-                    unplant_for_step(ph, site);
+                    if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                     return true;
                 }
                 std::vector<uint8_t> buf(len ? len : 1);
@@ -996,6 +1036,15 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
             uint64_t info = arg_ptr(is32, a[1]);
             ULONG len = (ULONG)a[2];
             uint64_t retlen_addr = arg_ptr(is32, a[3]);
+            // The two classes we buffer locally take their size from the
+            // target; without a cap a malicious target asks for 4 GB and
+            // bad_alloc kills the debugger.
+            if ((cls == kSystemCodeIntegrityUnlockInformation ||
+                 cls == kSystemCodeIntegrityInformation) &&
+                len > (1u << 20)) {
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
+                return true;
+            }
             if (cls == kSystemKernelDebuggerInformation) {
                 uint8_t out[2] = {0, 1};  // Enabled=FALSE, NotPresent=TRUE
                 if (info && len >= 2) wr_bytes(proc, info, out, 2);
@@ -1032,7 +1081,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                 // buffers with self-referential pointers (SystemProcessInformation
                 // and friends); replay the real call - filtering those is not
                 // implemented yet
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             }
             break;
@@ -1042,7 +1091,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                 // OBJECT_*INFORMATION layouts carry pointers; forwarding from
                 // this 64-bit debugger cannot reproduce the 32-bit view, so
                 // let the real call run unfiltered on WOW64 targets
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             }
             ULONG cls = (ULONG)a[1];
@@ -1052,7 +1101,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
             HANDLE local = dup_arg_handle(eng, a[0], is32, false);
             if (!local || !pNtQO || len > (1u << 22)) {
                 if (local) CloseHandle(local);
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             }
             std::vector<uint8_t> buf(len ? len : 1);
@@ -1078,7 +1127,8 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                         memcpy(&name_ptr, buf.data() + 8, 8);
                     }
                     std::wstring name;
-                    if (name_ptr >= local_base && name_ptr + name_len <= local_base + used) {
+                    if (name_ptr >= local_base && name_ptr <= local_base + used &&
+                        (uint64_t)name_len <= (local_base + used) - name_ptr) {
                         size_t noff = (size_t)(name_ptr - local_base);
                         name.assign((wchar_t*)(buf.data() + noff), name_len / 2);
                         uint64_t fixed = info + noff;
@@ -1097,8 +1147,39 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
                     }
                 }
                 wr_bytes(proc, info, buf.data(), used);
-            } else if (stt >= 0 && len) {
+            } else if (stt >= 0 && len && cls == kObjectNameInformation) {
+                // OBJECT_NAME_INFORMATION: UNICODE_STRING at offset 0 with
+                // Buffer at +8. The forwarded call filled our local buffer,
+                // so the pointer must be rebased into the target's buffer;
+                // handing the debugger address to the target would crash it.
+                size_t used = (rl && rl <= len ? rl : len);
+                bool relocated = false;
+                if (used >= 16) {
+                    uint16_t name_len = 0;
+                    uint64_t name_ptr = 0, local_base = (uint64_t)(uintptr_t)buf.data();
+                    memcpy(&name_len, buf.data(), 2);
+                    memcpy(&name_ptr, buf.data() + 8, 8);
+                    if (name_ptr >= local_base && name_ptr <= local_base + used &&
+                        (uint64_t)name_len <= (local_base + used) - name_ptr) {
+                        uint64_t fixed = info + (name_ptr - local_base);
+                        memcpy(buf.data() + 8, &fixed, 8);
+                        relocated = true;
+                    }
+                }
+                if (!relocated) {
+                    if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
+                    return true;  // let the real call produce a proper answer
+                }
+                wr_bytes(proc, info, buf.data(), used);
+            } else if (stt >= 0 && len &&
+                       (cls == kObjectBasicInformation || cls == kObjectHandleFlagInformation)) {
+                // plain value structures without embedded pointers
                 wr_bytes(proc, info, buf.data(), (rl && rl <= len ? rl : len));
+            } else if (stt >= 0 && len) {
+                // Unknown layout: copying it would leak pointers into the
+                // debugger's address space. Replay the real call instead.
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
+                return true;
             }
             if (retlen_addr) wr_u32(proc, retlen_addr, rl);
             done(stt);
@@ -1106,46 +1187,127 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
         }
         case HookApi::NtGetContextThread: {
             if (!cfg_.hook_ctx) {
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             }
             HANDLE local = dup_arg_handle(eng, a[0], is32, true);
             uint64_t ctx = arg_ptr(is32, a[1]);
             if (!local || !ctx) {
                 if (local) CloseHandle(local);
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             }
-            // Take the context from the debugger side (the exact struct the
-            // caller expects) and blank the debug registers - this hides the
-            // debugger's hardware breakpoints exactly like ScyllaHide does.
+            // Take the context from the debugger side and blank the debug
+            // registers - this hides the debugger's hardware breakpoints like
+            // ScyllaHide does. Only the groups the caller asked for are
+            // updated; everything else keeps the value that was already in
+            // the target's CONTEXT.
+            //
+            // x64 CONTEXT.ContextFlags lives at +0x30 (offset 0 is P1Home);
+            // on WOW64 it is the first field. Reading +0 on x64 made every
+            // GetThreadContext call fail with a garbage flag word.
+            const uint64_t flags_addr = ctx + (is32 ? 0 : kContextFlagsOffset64);
             ULONG ctxflags = 0;
-            rd_bytes(proc, ctx, &ctxflags, 4);
             LONG stt = kStatusSuccess;
-            if (is32) {
+            if (!rd_bytes(proc, flags_addr, &ctxflags, 4)) {
+                stt = kStatusInvalidParameter;
+            } else if (is32) {
                 WOW64_CONTEXT wc;
-                memset(&wc, 0, sizeof(wc));
-                wc.ContextFlags = ctxflags & ~0x10u;  // without DEBUG_REGISTERS
-                if (Wow64GetThreadContext(local, &wc)) {
-                    wc.ContextFlags = ctxflags;
-                    wc.Dr0 = wc.Dr1 = wc.Dr2 = wc.Dr3 = wc.Dr6 = wc.Dr7 = 0;
-                    wr_bytes(proc, ctx, &wc, sizeof(wc));
+                if (!rd_bytes(proc, ctx, &wc, sizeof(wc))) {
+                    stt = kStatusAccessViolation;
                 } else {
-                    stt = kStatusInvalidHandle;
+                    WOW64_CONTEXT c2;
+                    memset(&c2, 0, sizeof(c2));
+                    c2.ContextFlags = ctxflags & ~(ULONG)0x10;  // without DEBUG_REGISTERS
+                    if (Wow64GetThreadContext(local, &c2)) {
+                        if (ctxflags & 0x1) {  // control
+                            wc.Eip = c2.Eip;
+                            wc.Esp = c2.Esp;
+                            wc.Ebp = c2.Ebp;
+                            wc.EFlags = c2.EFlags;
+                        }
+                        if (ctxflags & 0x4) {  // segments
+                            wc.SegCs = c2.SegCs;
+                            wc.SegDs = c2.SegDs;
+                            wc.SegEs = c2.SegEs;
+                            wc.SegFs = c2.SegFs;
+                            wc.SegGs = c2.SegGs;
+                            wc.SegSs = c2.SegSs;
+                        }
+                        if (ctxflags & 0x2) {  // integer
+                            wc.Eax = c2.Eax;
+                            wc.Ecx = c2.Ecx;
+                            wc.Edx = c2.Edx;
+                            wc.Ebx = c2.Ebx;
+                            wc.Esi = c2.Esi;
+                            wc.Edi = c2.Edi;
+                        }
+                        if (ctxflags & 0x8)
+                            memcpy(&wc.FloatSave, &c2.FloatSave, sizeof(wc.FloatSave));
+                        if (ctxflags & 0x20)
+                            memcpy(wc.ExtendedRegisters, c2.ExtendedRegisters,
+                                   sizeof(wc.ExtendedRegisters));
+                        if (ctxflags & 0x10)
+                            wc.Dr0 = wc.Dr1 = wc.Dr2 = wc.Dr3 = wc.Dr6 = wc.Dr7 = 0;
+                        wc.ContextFlags = ctxflags;
+                        if (!wr_bytes(proc, ctx, &wc, sizeof(wc)))
+                            stt = kStatusAccessViolation;
+                    } else {
+                        stt = kStatusInvalidHandle;
+                    }
                 }
             } else {
                 CONTEXT c;
-                memset(&c, 0, sizeof(c));
-                c.ContextFlags = ctxflags & ~0x10u;  // without DEBUG_REGISTERS
-                if (GetThreadContext(local, &c)) {
-                    c.ContextFlags = ctxflags;
-                    c.Dr0 = c.Dr1 = c.Dr2 = c.Dr3 = 0;
-                    c.Dr6 = c.Dr7 = 0;
-                    c.LastBranchToRip = c.LastBranchFromRip = 0;
-                    c.LastExceptionToRip = c.LastExceptionFromRip = 0;
-                    wr_bytes(proc, ctx, &c, sizeof(c));
+                if (!rd_bytes(proc, ctx, &c, sizeof(c))) {
+                    stt = kStatusAccessViolation;
                 } else {
-                    stt = kStatusInvalidHandle;
+                    CONTEXT c2;
+                    memset(&c2, 0, sizeof(c2));
+                    c2.ContextFlags = ctxflags & ~(ULONG)0x10;  // without DEBUG_REGISTERS
+                    if (GetThreadContext(local, &c2)) {
+                        if (ctxflags & 0x1) {  // control
+                            c.Rip = c2.Rip;
+                            c.Rsp = c2.Rsp;
+                            c.Rbp = c2.Rbp;
+                            c.EFlags = c2.EFlags;
+                        }
+                        if (ctxflags & 0x4) {  // segments
+                            c.SegCs = c2.SegCs;
+                            c.SegDs = c2.SegDs;
+                            c.SegEs = c2.SegEs;
+                            c.SegFs = c2.SegFs;
+                            c.SegGs = c2.SegGs;
+                            c.SegSs = c2.SegSs;
+                        }
+                        if (ctxflags & 0x2) {  // integer
+                            c.Rax = c2.Rax;
+                            c.Rcx = c2.Rcx;
+                            c.Rdx = c2.Rdx;
+                            c.Rbx = c2.Rbx;
+                            c.Rsi = c2.Rsi;
+                            c.Rdi = c2.Rdi;
+                            c.R8 = c2.R8;
+                            c.R9 = c2.R9;
+                            c.R10 = c2.R10;
+                            c.R11 = c2.R11;
+                            c.R12 = c2.R12;
+                            c.R13 = c2.R13;
+                            c.R14 = c2.R14;
+                            c.R15 = c2.R15;
+                        }
+                        if (ctxflags & 0x8) c.FltSave = c2.FltSave;
+                        if (ctxflags & 0x10) {
+                            c.Dr0 = c.Dr1 = c.Dr2 = c.Dr3 = 0;
+                            c.Dr6 = c.Dr7 = 0;
+                            c.LastBranchToRip = c.LastBranchFromRip = 0;
+                            c.LastExceptionToRip = c.LastExceptionFromRip = 0;
+                        }
+                        c.ContextFlags = ctxflags;
+                        if (!wr_bytes(proc, ctx, &c, sizeof(c)))
+                            stt = kStatusAccessViolation;
+                    } else {
+                        stt = kStatusInvalidHandle;
+                    }
                 }
             }
             CloseHandle(local);
@@ -1154,7 +1316,7 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
         }
         case HookApi::NtSetContextThread: {
             if (!cfg_.hook_ctx) {
-                unplant_for_step(ph, site);
+                if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
                 return true;
             }
             uint64_t ctx = arg_ptr(is32, a[1]);
@@ -1164,12 +1326,13 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
             }
             // strip CONTEXT_DEBUG_REGISTERS from the flags in the target's own
             // buffer (ScyllaHide's protection), then let the real call happen
+            const uint64_t flags_addr = ctx + (is32 ? 0 : kContextFlagsOffset64);
             ULONG ctxflags = 0;
-            if (rd_bytes(proc, ctx, &ctxflags, 4)) {
+            if (rd_bytes(proc, flags_addr, &ctxflags, 4)) {
                 ULONG cleared = ctxflags & ~0x10u;
-                if (cleared != ctxflags) wr_bytes(proc, ctx, &cleared, 4);
+                if (cleared != ctxflags) wr_bytes(proc, flags_addr, &cleared, 4);
             }
-            unplant_for_step(ph, site);
+            if (!unplant_for_step(ph, site)) return emit_fail(site, "unplant");
             break;
         }
     }
@@ -1180,21 +1343,33 @@ bool Hider::emulate(ProcessHooks& ph, HookSite& site, bool& stop) {
 
 // --------------------------------------------- pass-through (step + replant)
 
-void Hider::unplant_for_step(ProcessHooks& ph, HookSite& site) {
+bool Hider::unplant_for_step(ProcessHooks& ph, HookSite& site) {
     Engine* eng = eng_;
     HANDLE proc = eng->process();
-    wr_bytes(proc, site.address, &site.original, 1);
+    if (!wr_bytes(proc, site.address, &site.original, 1)) return false;
     flush_icache(proc, site.address, 1);
     site.planted = false;
     pass_[eng_->tid()] = PassThrough{site.address, ph.pid};
     // single step over the real instruction, then re-plant the INT3
     CpuState st;
     std::string e;
-    if (eng->get_state(st, e)) {
+    bool ok = eng->get_state(st, e);
+    if (ok) {
         st.rip = site.address;
         st.rflags |= 0x100;  // TF
-        eng->set_state(st, e);
+        ok = eng->set_state(st, e);
     }
+    if (!ok) {
+        // Could not arm the step: put the hook back so the next call is not
+        // executed twice and report failure to the caller.
+        pass_.erase(eng->tid());
+        if (wr_bytes(proc, site.address, "\xCC", 1)) {
+            flush_icache(proc, site.address, 1);
+            site.planted = true;
+        }
+        return false;
+    }
+    return true;
 }
 
 // ================================================================== lifecycle
@@ -1251,6 +1426,54 @@ void Hider::unplant_all() {
         ph->planted = false;
     }
     pass_.clear();
+}
+
+// ------------------------------------------------------ snapshot capture
+
+HANDLE Hider::proc_of(uint32_t pid) const {
+    Engine* eng = eng_;
+    if (!eng) return nullptr;
+    for (const ProcessInfo& p : eng->processes())
+        if (p.pid == pid) return p.handle;
+    return nullptr;
+}
+
+void Hider::lift_for_capture(uint32_t pid) {
+    capture_lifted_.clear();
+    if (!enabled_) return;
+    ProcessHooks* ph = hooks_for(pid);
+    HANDLE proc = proc_of(pid);
+    if (!ph || !proc) return;
+    for (auto& s : ph->sites) {
+        if (!s.planted) continue;
+        if (!wr_bytes(proc, s.address, &s.original, 1)) continue;  // stays planted
+        flush_icache(proc, s.address, 1);
+        s.planted = false;
+        capture_lifted_.push_back(s.address);
+    }
+}
+
+void Hider::replant_after_capture(uint32_t pid) {
+    ProcessHooks* ph = hooks_for(pid);
+    HANDLE proc = proc_of(pid);
+    if (!ph || !proc) {
+        capture_lifted_.clear();
+        return;
+    }
+    Engine* eng = eng_;
+    for (uint64_t addr : capture_lifted_) {
+        // a user breakpoint planted while we were lifted owns the byte now
+        if (eng && eng->bps.has_address(addr)) continue;
+        for (auto& s : ph->sites) {
+            if (s.address != addr) continue;
+            if (wr_bytes(proc, s.address, "\xCC", 1)) {
+                flush_icache(proc, s.address, 1);
+                s.planted = true;
+            }
+            break;
+        }
+    }
+    capture_lifted_.clear();
 }
 
 void Hider::reapply() {
@@ -1333,7 +1556,7 @@ bool Hider::on_breakpoint(uint64_t addr, bool& stop) {
             d.set_hex("address", addr);
             Output::instance().event("hide_emulate_failed",
                                      "hook emulation failed, replaying the original call", d);
-            unplant_for_step(*ph, s);
+            if (!unplant_for_step(*ph, s)) return false;  // surface as a foreign break
             stop = false;
         }
         return true;
@@ -1359,9 +1582,11 @@ bool Hider::on_single_step() {
     if (!proc) return true;
     for (auto& s : ph->sites) {
         if (s.address != addr) continue;
-        wr_bytes(proc, s.address, "\xCC", 1);
-        flush_icache(proc, s.address, 1);
-        s.planted = true;
+        // Only claim the hook is armed when the write really succeeded.
+        if (wr_bytes(proc, s.address, "\xCC", 1)) {
+            flush_icache(proc, s.address, 1);
+            s.planted = true;
+        }
         break;
     }
     return true;

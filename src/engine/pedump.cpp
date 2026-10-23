@@ -73,8 +73,6 @@ bool dump_pe(HANDLE proc, uint64_t base, const std::string& path, const DumpOpti
         return false;
     }
 
-    uint32_t entry_rva = *(uint32_t*)(opt + 0x10);
-    uint64_t image_base = is64 ? *(uint64_t*)(opt + 0x18) : (uint64_t)*(uint32_t*)(opt + 0x1C);
     uint32_t sect_align = *(uint32_t*)(opt + 0x30);
     uint32_t file_align = *(uint32_t*)(opt + 0x34);
     uint32_t size_image = *(uint32_t*)(opt + 0x38);
@@ -89,9 +87,32 @@ bool dump_pe(HANDLE proc, uint64_t base, const std::string& path, const DumpOpti
         err = "implausible SizeOfImage";
         return false;
     }
+    // The output header buffer is allocated from the target's SizeOfHeaders
+    // and then patched at target-controlled offsets (e_lfanew, opt_size,
+    // section table). Validate the whole range first: a packed sample that
+    // shrinks SizeOfHeaders in memory used to drive an out-of-bounds heap
+    // write here.
+    const uint64_t kMaxHeaders = 0x1000000;  // 16 MiB
+    if (size_headers < 0x40 || size_headers > kMaxHeaders) {
+        err = "implausible SizeOfHeaders";
+        return false;
+    }
+    if (opt_size < 0x48) {
+        err = "implausible SizeOfOptionalHeader";
+        return false;
+    }
+    const uint64_t min_header_end = (uint64_t)lfanew + 24 + 0x48;
+    if ((uint64_t)size_headers < min_header_end) {
+        err = "header area too small for the optional header";
+        return false;
+    }
 
     // ---- section table ---------------------------------------------------
     size_t sect_off = lfanew + 4 + 20 + opt_size;
+    if ((uint64_t)sect_off + (uint64_t)num_sections * 40 > size_headers) {
+        err = "section table lies outside SizeOfHeaders";
+        return false;
+    }
     std::vector<uint8_t> sect_buf((size_t)num_sections * 40);
     if (!read_mem(proc, base + sect_off, sect_buf.data(), sect_buf.size(), err)) {
         err = "cannot read the section table";
@@ -118,6 +139,12 @@ bool dump_pe(HANDLE proc, uint64_t base, const std::string& path, const DumpOpti
     uint64_t next_raw = align_up(size_headers, file_align);
     for (auto& s : sections) {
         uint64_t need = s.vsize ? s.vsize : s.raw_size;
+        // A section cannot legitimately be much larger than the image it is
+        // part of; otherwise a crafted header makes us write a multi-GB file.
+        if (need > (uint64_t)size_image + 0x1000000) {
+            err = "implausible section size";
+            return false;
+        }
         uint64_t raw_size = align_up(need, file_align);
         if (opts.compact) {
             s.raw_ptr = (uint32_t)next_raw;
@@ -126,6 +153,10 @@ bool dump_pe(HANDLE proc, uint64_t base, const std::string& path, const DumpOpti
             uint64_t p = align_up(s.va ? s.va : next_raw, file_align);
             s.raw_ptr = (uint32_t)p;
             next_raw = p + raw_size;
+        }
+        if (next_raw > 0xFFFFFFFFull) {
+            err = "output image exceeds the 4 GB PE offset limit";
+            return false;
         }
         s.raw_size = (uint32_t)raw_size;
     }

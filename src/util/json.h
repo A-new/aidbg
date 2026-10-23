@@ -47,6 +47,7 @@ public:
     const Json& get(const std::string& key) const;
     std::string as_str(const std::string& fallback = {}) const;
     uint64_t as_u(uint64_t fallback = 0) const;
+    int64_t as_i(int64_t fallback = 0) const;
     bool as_bool(bool fallback = false) const;
 
     // indent == 0 -> compact single line (best for JSONL / AI parsing)

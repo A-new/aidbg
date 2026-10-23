@@ -85,6 +85,7 @@ CmdResult cmd_help(Engine&, CliConfig& cfg, const std::vector<std::string>&) {
     t += "  info | version           session state / version\n\n";
     t += "Execution:\n";
     t += "  continue|c|g [timeout]   resume execution\n";
+    t += "  pause [timeout]          stop a running target (after a continue timeout)\n";
     t += "  step|si [count]          single step (step into)\n";
     t += "  next|n|so [count]        step over calls\n";
     t += "  finish|gu                run until the current function returns\n";
@@ -200,6 +201,17 @@ CmdResult cmd_aslr(Engine& e, CliConfig& cfg, const std::vector<std::string>& a)
     return ok(d, fmt("aslr: %s\n", cfg.fixed_base ? "off (fixed base)" : "on (randomized)"));
 }
 
+CmdResult cmd_sleep(Engine&, CliConfig&, const std::vector<std::string>& a) {
+    if (a.empty()) return fail("bad_args", "sleep <ms>");
+    uint64_t ms = 0;
+    if (!parse_u64(a[0], ms) || ms == 0 || ms > 60000)
+        return fail("bad_args", "invalid duration (1..60000 ms)");
+    Sleep((DWORD)ms);
+    Json d = Json::obj();
+    d.set_u("slept_ms", ms);
+    return ok(d, fmt("slept %llu ms\n", (unsigned long long)ms));
+}
+
 CmdResult cmd_info(Engine& e, CliConfig& cfg, const std::vector<std::string>&) {
     Json d = Json::obj();
     d.set_str("version", "aidbg " AIDBG_VERSION);
@@ -239,6 +251,20 @@ CmdResult cmd_cont(Engine& e, CliConfig&, const std::vector<std::string>& a) {
     std::string err;
     if (!e.resume(ResumeAction::Continue, 0, (uint32_t)tmo, err))
         return fail("resume_failed", err);
+    Json d = Json::obj();
+    d.set("stop", e.stop_info().to_json());
+    return ok(d, "stopped: " + e.stop_info().text + "\n");
+}
+
+// Stops a target that is still running (typically after `continue <timeout>`
+// gave up waiting). DebugBreakProcess posts a breakpoint exception; the pump
+// then reports it as a normal system break.
+CmdResult cmd_pause(Engine& e, CliConfig&, const std::vector<std::string>& a) {
+    if (!e.active()) return fail("no_target", "no active target");
+    uint64_t tmo = 5000;
+    if (!a.empty() && !parse_u64(a[0], tmo)) return fail("bad_args", "usage: pause [timeout_ms]");
+    std::string err;
+    if (!e.pause((uint32_t)tmo, err)) return fail("pause_failed", err);
     Json d = Json::obj();
     d.set("stop", e.stop_info().to_json());
     return ok(d, "stopped: " + e.stop_info().text + "\n");
@@ -298,6 +324,17 @@ CmdResult cmd_break(Engine& e, CliConfig&, const std::vector<std::string>& a) {
     bp.kind = BpKind::Software;
     if (a.size() > 1) bp.condition = join_from(a, 1);
     resolve_or_defer(e, bp, a[0]);
+
+    // Two software breakpoints on the same byte would each store the other's
+    // 0xCC as "original" and corrupt the instruction on removal.
+    for (auto& x : e.bps.all()) {
+        if (x.kind != BpKind::Software || x.temporary) continue;
+        bool same = (bp.resolved && x.resolved && x.address == bp.address) ||
+                    (!bp.symbol.empty() && x.symbol == bp.symbol);
+        if (same)
+            return fail("already_set",
+                        fmt("breakpoint %d already covers %s", x.id, a[0].c_str()));
+    }
 
     std::string err;
     int id = e.bps.add(bp);
@@ -379,6 +416,15 @@ CmdResult cmd_mbreak(Engine& e, CliConfig&, const std::vector<std::string>& a) {
             else if (c == 'x') acc |= BP_ACC_EXEC;
         }
         if (acc) bp.access = acc;
+    }
+    for (auto& x : e.bps.all()) {
+        if (x.kind != BpKind::Memory || x.temporary) continue;
+        bool same = (bp.resolved && x.resolved && x.address == bp.address &&
+                     x.size == bp.size) ||
+                    (!bp.symbol.empty() && x.symbol == bp.symbol);
+        if (same)
+            return fail("already_set",
+                        fmt("memory breakpoint %d already covers %s", x.id, a[0].c_str()));
     }
     std::string err;
     int id = e.bps.add(bp);
@@ -927,6 +973,7 @@ CmdResult cmd_processes(Engine& e, CliConfig&, const std::vector<std::string>&) 
         j.set_u("pid", p.pid);
         j.set_str("arch", p.arch_text());
         j.set_bool("alive", p.alive);
+        if (p.is_system) j.set_bool("system", true);
         j.set_str("name", p.exe_name);
         j.set_str("path", p.exe_path);
         j.set_u("modules", p.modules.size());
@@ -1390,21 +1437,32 @@ CmdResult cmd_autostep(Engine& e, CliConfig&, const std::vector<std::string>& a)
 // ---------------------------------------------------------- control flow
 
 CmdResult cmd_flow(Engine& e, CliConfig&, const std::vector<std::string>& a) {
-    uint64_t addr = 0;
-    if (a.empty()) {
+    uint64_t addr = 0, max_blocks = 64;
+    bool have_addr = false, have_max = false;
+    for (const auto& tok : a) {
+        if (starts_with(tok, "max=") || starts_with(tok, "max:")) {
+            if (!parse_u64(tok.substr(4), max_blocks))
+                return fail("bad_args", "invalid block count");
+            have_max = true;
+        } else if (!have_addr) {
+            CmdResult dummy;
+            if (!resolve(e, tok, addr, dummy)) return dummy;
+            have_addr = true;
+        } else if (!have_max) {
+            if (!parse_u64(tok, max_blocks)) return fail("bad_args", "invalid block count");
+            have_max = true;
+        } else {
+            return fail("bad_args", "unexpected argument: " + tok);
+        }
+    }
+    if (!have_addr) {
         if (!e.is_paused())
             return fail("not_paused", "target is not paused (specify an address)");
         CpuState st;
         std::string err;
         if (!e.get_state(st, err)) return fail("cfg_failed", err);
         addr = st.rip;
-    } else {
-        CmdResult dummy;
-        if (!resolve(e, a[0], addr, dummy)) return dummy;
     }
-    uint64_t max_blocks = 64;
-    if (a.size() > 1 && !parse_u64(a[1], max_blocks))
-        return fail("bad_args", "invalid block count");
     if (max_blocks == 0 || max_blocks > 512) max_blocks = 64;
 
     CfgInput in;
@@ -1458,7 +1516,11 @@ CmdResult cmd_snapshot(Engine& e, CliConfig&, const std::vector<std::string>& a)
     if (action == "delete" || action == "del") {
         size_t idx = 0;
         if (!e.snaps.find(arg, idx)) return fail("not_found", "no such snapshot: " + arg);
-        e.snaps.remove(idx);
+        // Only the newest snapshot can be dropped without breaking the delta
+        // chain; reporting the failure beats claiming it was removed.
+        if (!e.snaps.remove(idx))
+            return fail("not_allowed",
+                        "only the newest snapshot can be deleted (use clear to drop all)");
         Json d = Json::obj();
         d.set_u("remaining", e.snaps.count());
         return ok(d, fmt("snapshot %s removed (%zu left)\n", arg.c_str(), e.snaps.count()));
@@ -1534,11 +1596,14 @@ CmdResult cmd_snapshot(Engine& e, CliConfig&, const std::vector<std::string>& a)
         if (arg.empty() || !parse_u64(arg, id))
             return fail("bad_args", "snapshot load <id>");
         if (!e.is_paused()) return fail("not_paused", "target is not paused");
-        if (!e.snaps.restore_from_store((uint32_t)id, e.process(), e.thread(), err))
+        // through the engine, so planted breakpoints are lifted and re-armed
+        // around the restore (restoring over INT3s corrupts both sides)
+        if (!e.snapshot_restore_from_store((uint32_t)id, err))
             return fail("restore_failed", err);
         Json d = Json::obj();
         d.set_u("id", id);
         d.set_u("skipped_pages", e.snaps.skipped_pages());
+        d.set_str("rip", e.session_meta().rip);
         return ok(d, fmt("restored snapshot %llu from the store (skipped %zu un-writable page(s))\n",
                          (unsigned long long)id, e.snaps.skipped_pages()));
     }
@@ -2506,9 +2571,11 @@ const CmdSpec kCmds[] = {
     {"restart", "", "restart", "kill and launch again", false, false, cmd_restart},
     {"aslr", "", "aslr [on|off]", "fix the load base to the PE ImageBase (default off = fixed)", false, false, cmd_aslr},
     {"info", "", "info", "show session state", false, false, cmd_info},
+    {"sleep", "wait", "sleep <ms>", "pause the debugger (not the target) for script timing tests", false, false, cmd_sleep},
     {"version", "", "version", "show version", false, false, cmd_version},
 
     {"continue", "c,g", "continue [timeout_ms]", "resume execution", true, true, cmd_cont},
+    {"pause", "break-in", "pause [timeout_ms]", "stop a running target (inject a break)", true, false, cmd_pause},
     {"step", "si,t", "step [count]", "single step, stepping into calls", true, true, cmd_step},
     {"next", "n,so,p", "next [count]", "single step, stepping over calls", true, true, cmd_next},
     {"finish", "gu", "finish", "run until the current function returns", true, true, cmd_finish},
@@ -2627,8 +2694,11 @@ CmdResult dispatch(Engine& eng, CliConfig& cfg, const std::string& line,
     cmd_name = to_lower(parts[0]);
     std::vector<std::string> args(parts.begin() + 1, parts.end());
 
-    // quit is handled by the caller but reported as a normal command
+    // quit is handled by the caller but reported as a normal command. The
+    // name must be canonical: the caller only stops on "quit", so returning
+    // "q"/"exit" here made those aliases do nothing.
     if (cmd_name == "quit" || cmd_name == "exit" || cmd_name == "q") {
+        cmd_name = "quit";
         CmdResult r;
         Json d = Json::obj();
         d.set_bool("quitting", true);

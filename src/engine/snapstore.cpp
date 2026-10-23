@@ -1,5 +1,6 @@
 #include "engine/snapstore.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -159,17 +160,25 @@ bool SnapStore::open(const std::string& path, std::string& err) {
     fp_ = f;
 
     // scan the file for records; this also survives a bad/missing header
-    std::fseek(f, 0, SEEK_END);
-    long sz = std::ftell(f);
+    _fseeki64(f, 0, SEEK_END);
+    long long sz = _ftelli64(f);
     if (sz < 0) {
         err = "cannot stat snapshot store";
+        close();
+        return false;
+    }
+    // A store this large is not something a debug session produces; refuse it
+    // rather than trying to read it into one vector.
+    constexpr long long kMaxStoreBytes = 8ll * 1024 * 1024 * 1024;
+    if (sz > kMaxStoreBytes) {
+        err = "snapshot store is unreasonably large";
         close();
         return false;
     }
     file_size_ = (uint64_t)sz;
 
     std::vector<uint8_t> buf((size_t)sz);
-    std::fseek(f, 0, SEEK_SET);
+    _fseeki64(f, 0, SEEK_SET);
     size_t got = std::fread(buf.data(), 1, (size_t)sz, f);
     buf.resize(got);
 
@@ -185,11 +194,12 @@ bool SnapStore::open(const std::string& path, std::string& err) {
         size_t o = 8;
         uint64_t total = 0;
         if (!get_u64(h, kRecHeaderSize, o, total) || total < kRecHeaderSize ||
-            off + total > buf.size()) {
+            total > buf.size() - off) {
             break;  // truncated tail from an interrupted write
         }
 
         SnapRecord r;
+        r.file_offset = (uint64_t)off;
         uint32_t flags = 0, name_len = 0, reason_len = 0, regs_len = 0, is32 = 0;
         get_u32(h, kRecHeaderSize, o, r.id);
         get_u32(h, kRecHeaderSize, o, r.kind);
@@ -222,7 +232,14 @@ bool SnapStore::open(const std::string& path, std::string& err) {
             body += regs_len;
         }
         if (body < end) {
-            r.payload.assign(buf.begin() + (long)body, buf.begin() + (long)end);
+            r.payload.assign(buf.begin() + (std::ptrdiff_t)body,
+                             buf.begin() + (std::ptrdiff_t)end);
+        }
+        // A payload that does not match its checksum is truncated or has been
+        // tampered with; decoding it would trust attacker-controlled fields.
+        if (r.payload_crc && crc32(r.payload.data(), r.payload.size()) != r.payload_crc) {
+            off = end;
+            continue;
         }
         if (r.id >= next_id_) next_id_ = r.id + 1;
         recs_.push_back(std::move(r));
@@ -266,8 +283,12 @@ bool SnapStore::write_record(const SnapRecord& rec, uint64_t& offset, std::strin
     b.insert(b.end(), rec.payload.begin(), rec.payload.end());
 
     FILE* f = (FILE*)fp_;
-    std::fseek(f, 0, SEEK_END);
-    long at = std::ftell(f);
+    _fseeki64(f, 0, SEEK_END);
+    long long at = _ftelli64(f);
+    if (at < 0) {
+        err = "cannot determine snapshot store position";
+        return false;
+    }
     offset = (uint64_t)at;
     if (std::fwrite(b.data(), 1, b.size(), f) != b.size()) {
         err = "failed to write snapshot record";
@@ -289,17 +310,10 @@ bool SnapStore::append(SnapRecord rec, std::string& err) {
 
     uint64_t offset = 0;
     if (!write_record(rec, offset, err)) return false;
+    rec.file_offset = offset;
     if (rec.id >= next_id_) next_id_ = rec.id + 1;
     recs_.push_back(std::move(rec));
     return true;
-}
-
-bool SnapStore::update(const SnapRecord& rec, std::string& err) {
-    // log structured: never rewrite in place, supersede instead. `compact()`
-    // reclaims the space later.
-    for (auto& r : recs_)
-        if (r.id == rec.id && !r.deleted) r.deleted = true;
-    return append(rec, err);
 }
 
 bool SnapStore::mark_deleted(uint32_t id, std::string& err) {
@@ -308,12 +322,29 @@ bool SnapStore::mark_deleted(uint32_t id, std::string& err) {
         return false;
     }
     for (auto& r : recs_) {
-        if (r.id == id) {
-            r.deleted = true;
-            // the flag lives in the record header; rewrite just that word
-            std::fseek((FILE*)fp_, 0, SEEK_END);
-            return true;
+        if (r.id != id) continue;
+        // The deleted flag lives in the record header, right after
+        // magic(8)+total(8)+id(4)+kind(4)+prev(4)+pid(4)+is32(4).
+        constexpr long long kFlagsOffset = 8 + 8 + 4 + 4 + 4 + 4 + 4;
+        FILE* f = (FILE*)fp_;
+        if (_fseeki64(f, (long long)r.file_offset + kFlagsOffset, SEEK_SET) != 0) {
+            err = "cannot seek to the snapshot record";
+            return false;
         }
+        uint32_t flags = 0;
+        if (std::fread(&flags, 1, 4, f) != 4) {
+            err = "cannot read the snapshot record flags";
+            return false;
+        }
+        flags |= kFlagDeleted;
+        if (_fseeki64(f, (long long)r.file_offset + kFlagsOffset, SEEK_SET) != 0 ||
+            std::fwrite(&flags, 1, 4, f) != 4) {
+            err = "cannot update the snapshot record flags";
+            return false;
+        }
+        std::fflush(f);
+        r.deleted = true;
+        return true;
     }
     err = fmt("no such record: %u", id);
     return false;
@@ -380,8 +411,9 @@ bool SnapStore::rewrite_all(const std::vector<SnapRecord>& recs, std::string& er
     }
     // reopen so the handle tracks the new file
     fp_ = std::fopen(path_.c_str(), "r+b");
-    std::fseek((FILE*)fp_, 0, SEEK_END);
-    file_size_ = (uint64_t)std::ftell((FILE*)fp_);
+    _fseeki64((FILE*)fp_, 0, SEEK_END);
+    long long end = _ftelli64((FILE*)fp_);
+    file_size_ = end > 0 ? (uint64_t)end : 0;
     return true;
 }
 

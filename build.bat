@@ -9,14 +9,31 @@ rem trailing dot so the quoted path stays well formed.
 set "ROOT=%~dp0."
 set "BUILDDIR=%~dp0build"
 
-set VCVARS="D:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars64.bat"
-set VCVARS32="D:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars32.bat"
-if not exist %VCVARS% (
-  echo [error] vcvars64.bat not found at %VCVARS%
+rem Preferred install (the one this project was developed with). When it is
+rem missing, look for any recent MSVC installation instead of hard-failing:
+rem the old script only worked on a machine with exactly this VS path.
+set "VCVARS=D:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars64.bat"
+if not exist "%VCVARS%" (
+  for %%r in ("%ProgramFiles%" "%ProgramFiles(x86)%") do (
+    for %%y in (18 2022 2019) do (
+      for %%e in (Professional Community Enterprise BuildTools) do (
+        if not defined FOUND_VS if exist "%%~r\Microsoft Visual Studio\%%y\%%e\VC\Auxiliary\Build\vcvars64.bat" (
+          set "VCVARS=%%~r\Microsoft Visual Studio\%%y\%%e\VC\Auxiliary\Build\vcvars64.bat"
+          set "FOUND_VS=1"
+        )
+      )
+    )
+  )
+)
+set "VCVARS32=%VCVARS:vcvars64.bat=vcvars32.bat%"
+rem quoted form, used inside the nested cmd /c line below
+set VCVARS32Q="%VCVARS32%"
+if not exist "%VCVARS%" (
+  echo [error] vcvars64.bat not found; install the MSVC build tools or edit build.bat
   exit /b 1
 )
 
-call %VCVARS% >nul 2>&1
+call "%VCVARS%" >nul 2>&1
 if errorlevel 1 (
   echo [error] failed to initialize MSVC environment
   exit /b 1
@@ -34,7 +51,7 @@ if errorlevel 1 (
 )
 rem the x86 stub needs the 32-bit library paths, so it builds in its own vcvars32
 rem environment (the x64 environment cannot link it)
-cmd /c "call %VCVARS32% >nul 2>&1 && cl /nologo /O1 /MT /W3 ""%ROOT%\src\host\dllhost.c"" /Fo:""%BUILDDIR%\host\dllhost32.obj"" /Fe:""%BUILDDIR%\host\dllhost32.exe"" /link /SUBSYSTEM:CONSOLE >nul"
+cmd /c "call %VCVARS32Q% >nul 2>&1 && cl /nologo /O1 /MT /W3 ""%ROOT%\src\host\dllhost.c"" /Fo:""%BUILDDIR%\host\dllhost32.obj"" /Fe:""%BUILDDIR%\host\dllhost32.exe"" /link /SUBSYSTEM:CONSOLE >nul"
 if errorlevel 1 (
   echo [error] failed to build the x86 DLL host
   exit /b 1

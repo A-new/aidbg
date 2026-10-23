@@ -17,6 +17,8 @@ struct CliConfig {
     bool new_console = false;
     bool follow_children = true;  // also debug processes spawned by the target
     bool fixed_base = true;       // disable ASLR so the image loads at its ImageBase
+    // --hide <profile>; applied to the engine in both the CLI and MCP paths
+    std::string hide_profile;
 };
 
 // Executes one command line. `cmd_name` receives the canonical command name so

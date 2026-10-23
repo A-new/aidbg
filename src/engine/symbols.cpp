@@ -21,32 +21,52 @@ std::string sym_name(const SYMBOL_INFO* si) {
 }
 }  // namespace
 
-bool Symbols::init(HANDLE proc, const std::string& search_path, std::string& err) {
+bool Symbols::init(uint32_t pid, HANDLE proc, const std::string& search_path, std::string& err) {
+    if (!proc) return false;
     SymSetOptions(kSymOptions);
-    // DbgHelp's narrow entry points expect the ANSI codepage; symbol names and
-    // PDB paths are ASCII in practice.
-    if (!SymInitialize(proc, search_path.empty() ? nullptr : search_path.c_str(), FALSE)) {
+    // an old session for a recycled pid must not leak module state into the
+    // new process
+    auto it = procs_.find(pid);
+    if (it != procs_.end() && it->second != proc) {
+        SymCleanup(it->second);
+        procs_.erase(it);
+    }
+    // Wide entry point: module/PDB paths are not ASCII in practice (anything
+    // containing a non-ASCII directory name failed to load with the ANSI API).
+    std::wstring wsearch = to_wide(search_path);
+    if (!SymInitializeW(proc, wsearch.empty() ? nullptr : wsearch.c_str(), FALSE)) {
         err = fmt("SymInitialize failed: %s", last_error_text().c_str());
         return false;
     }
-    proc_ = proc;
-    ready_ = true;
+    procs_[pid] = proc;
     return true;
 }
 
 void Symbols::shutdown() {
-    if (ready_ && proc_) {
-        SymCleanup(proc_);
-        ready_ = false;
-    }
+    for (auto& kv : procs_) SymCleanup(kv.second);
+    procs_.clear();
+    current_ = 0;
 }
 
-bool Symbols::load_module(uint64_t base, size_t size, const std::string& path,
+bool Symbols::ready() const {
+    return cur() != nullptr;
+}
+
+HANDLE Symbols::cur() const {
+    auto it = procs_.find(current_);
+    return it == procs_.end() ? nullptr : it->second;
+}
+
+bool Symbols::load_module(uint32_t pid, uint64_t base, size_t size, const std::string& path,
                           const std::string& name, std::string& err) {
-    if (!ready_) return true;  // symbol support is optional
-    DWORD64 r = SymLoadModuleEx(proc_, nullptr, path.c_str(),
-                                name.empty() ? nullptr : name.c_str(), (DWORD64)base,
-                                (DWORD)size, nullptr, 0);
+    auto it = procs_.find(pid);
+    if (it == procs_.end()) return true;  // symbol support is optional
+    HANDLE proc = it->second;
+    std::wstring wpath = to_wide(path);
+    std::wstring wname = to_wide(name);
+    DWORD64 r = SymLoadModuleExW(proc, nullptr, wpath.empty() ? nullptr : wpath.c_str(),
+                                 wname.empty() ? nullptr : wname.c_str(), (DWORD64)base,
+                                 (DWORD)size, nullptr, 0);
     if (!r) {
         err = fmt("SymLoadModuleEx(%s) failed: %s", name.c_str(), last_error_text().c_str());
         return false;
@@ -54,15 +74,17 @@ bool Symbols::load_module(uint64_t base, size_t size, const std::string& path,
     return true;
 }
 
-bool Symbols::unload_module(uint64_t base) {
-    if (!ready_) return true;
-    SymUnloadModule64(proc_, (DWORD64)base);
+bool Symbols::unload_module(uint32_t pid, uint64_t base) {
+    auto it = procs_.find(pid);
+    if (it == procs_.end()) return true;
+    SymUnloadModule64(it->second, (DWORD64)base);
     return true;
 }
 
 bool Symbols::resolve_name(const std::string& name, uint64_t& out, std::string& err) {
-    if (!ready_) {
-        err = "symbol support is not available (DbgHelp init failed)";
+    HANDLE proc = cur();
+    if (!proc) {
+        err = "symbol support is not available (no session for the current process)";
         return false;
     }
     // SymFromName handles "module!symbol" and plain "symbol".
@@ -71,7 +93,7 @@ bool Symbols::resolve_name(const std::string& name, uint64_t& out, std::string& 
     SYMBOL_INFO* si = (SYMBOL_INFO*)buf.data();
     si->SizeOfStruct = sizeof(SYMBOL_INFO);
     si->MaxNameLen = MAX_SYM_NAME;
-    if (!SymFromName(proc_, name.c_str(), si)) {
+    if (!SymFromName(proc, name.c_str(), si)) {
         err = fmt("symbol not found: %s", name.c_str());
         return false;
     }
@@ -83,13 +105,14 @@ bool Symbols::lookup_address(uint64_t addr, std::string& name, uint64_t& disp,
                              std::string& err) {
     name.clear();
     disp = 0;
-    if (!ready_) return false;
+    HANDLE proc = cur();
+    if (!proc) return false;
     std::vector<char> buf(sizeof(SYMBOL_INFO) + MAX_SYM_NAME);
     SYMBOL_INFO* si = (SYMBOL_INFO*)buf.data();
     si->SizeOfStruct = sizeof(SYMBOL_INFO);
     si->MaxNameLen = MAX_SYM_NAME;
     DWORD64 d = 0;
-    if (!SymFromAddr(proc_, (DWORD64)addr, &d, si)) return false;
+    if (!SymFromAddr(proc, (DWORD64)addr, &d, si)) return false;
     name = sym_name(si);
     disp = (uint64_t)d;
     return true;
@@ -99,13 +122,14 @@ bool Symbols::function_extent(uint64_t addr, uint64_t& start, uint64_t& end,
                               std::string& name) {
     start = end = 0;
     name.clear();
-    if (!ready_) return false;
+    HANDLE proc = cur();
+    if (!proc) return false;
     std::vector<char> buf(sizeof(SYMBOL_INFO) + MAX_SYM_NAME);
     SYMBOL_INFO* si = (SYMBOL_INFO*)buf.data();
     si->SizeOfStruct = sizeof(SYMBOL_INFO);
     si->MaxNameLen = MAX_SYM_NAME;
     DWORD64 d = 0;
-    if (!SymFromAddr(proc_, (DWORD64)addr, &d, si)) return false;
+    if (!SymFromAddr(proc, (DWORD64)addr, &d, si)) return false;
     // Only functions carry a usable extent; a data symbol's size is not a code
     // range and would produce a nonsense graph. SymTagEnum values from
     // dbghelp.h: SymTagFunction = 5, SymTagPublicSymbol = 10.
@@ -122,13 +146,14 @@ bool Symbols::line_from_address(uint64_t addr, std::string& file, uint32_t& line
     file.clear();
     line = 0;
     disp = 0;
-    if (!ready_) return false;
-    IMAGEHLP_LINE64 ln;
+    HANDLE proc = cur();
+    if (!proc) return false;
+    IMAGEHLP_LINEW64 ln;
     std::memset(&ln, 0, sizeof(ln));
     ln.SizeOfStruct = sizeof(ln);
     DWORD d = 0;
-    if (!SymGetLineFromAddr64(proc_, (DWORD64)addr, &d, &ln)) return false;
-    file = ln.FileName ? ln.FileName : "";
+    if (!SymGetLineFromAddrW64(proc, (DWORD64)addr, &d, &ln)) return false;
+    file = ln.FileName ? to_utf8(ln.FileName) : "";
     line = ln.LineNumber;
     disp = d;
     return true;
@@ -157,10 +182,11 @@ BOOL CALLBACK enum_cb(SYMBOL_INFO* si, ULONG /*size*/, PVOID user) {
 
 Json Symbols::enumerate(const std::string& mask, size_t max) {
     Json arr = Json::arr();
-    if (!ready_) return arr;
+    HANDLE proc = cur();
+    if (!proc) return arr;
     EnumCtx ctx{&arr, max, 0};
     std::string mask_str = mask.empty() ? "*" : mask;
-    SymEnumSymbols(proc_, (DWORD64)0, mask_str.c_str(), enum_cb, &ctx);
+    SymEnumSymbols(proc, (DWORD64)0, mask_str.c_str(), enum_cb, &ctx);
     return arr;
 }
 

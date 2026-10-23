@@ -7,7 +7,7 @@
 *.lib
 
 # fixed-base swap leftovers (crash or in-flight launch artifacts)
-*.aidbg-patched
+*.aidbg-patched*
 *.aidbg-orig
 
 # test run artifacts
@@ -23,3 +23,4 @@ tests/*.noaslr.exe
 
 # local notes / scratch
 *.aidbg-notes.json
+问题.md

@@ -4,6 +4,9 @@
 
 #include <cstring>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 #include "engine/memory.h"
 #include "engine/win_compat.h"
@@ -289,6 +292,12 @@ std::string handle_type(HANDLE dup) {
     USHORT maxlen = *(USHORT*)(buf.data() + 2);
     wchar_t* p = *(wchar_t**)(buf.data() + 8);
     if (!p || !len || !maxlen) return {};
+    // The kernel filled this buffer; the pointer must point inside it before
+    // we dereference it on the debugger's thread.
+    const uintptr_t lo = (uintptr_t)buf.data();
+    const uintptr_t hi = lo + buf.size();
+    const uintptr_t pv = (uintptr_t)p;
+    if (pv < lo || pv > hi || len > buf.size() || (pv - lo) + len > buf.size()) return {};
     return to_utf8(std::wstring(p, len / sizeof(wchar_t)));
 }
 
@@ -301,6 +310,10 @@ std::string handle_name(HANDLE dup) {
     USHORT len = *(USHORT*)buf.data();
     wchar_t* p = *(wchar_t**)(buf.data() + 8);
     if (!p || !len) return {};
+    const uintptr_t lo = (uintptr_t)buf.data();
+    const uintptr_t hi = lo + buf.size();
+    const uintptr_t pv = (uintptr_t)p;
+    if (pv < lo || pv > hi || len > buf.size() || (pv - lo) + len > buf.size()) return {};
     return to_utf8(std::wstring(p, len / sizeof(wchar_t)));
 }
 }  // namespace
@@ -321,12 +334,22 @@ bool enum_handles(uint32_t pid, const std::string& type_filter, std::vector<Hand
     std::vector<uint8_t> buf(1 << 22);
     ULONG needed = 0;
     LONG st = 0;
+    constexpr size_t kMaxHandleTable = 256u << 20;  // 256 MiB
     for (int attempt = 0; attempt < 8; ++attempt) {
         st = pNtQuerySystemInformation(kSystemExtendedHandleInformation, buf.data(),
                                        (ULONG)buf.size(), &needed);
         if (st == 0) break;
         if (st != (LONG)0xC0000004 /*STATUS_INFO_LENGTH_MISMATCH*/) break;
-        buf.resize(needed ? (size_t)needed * 2 : buf.size() * 2);
+        if (needed > kMaxHandleTable) {
+            err = "system handle table is unreasonably large";
+            return false;
+        }
+        // Grow to the reported size plus slack instead of doubling without
+        // bound; a broken/hostile reply must not drive a multi-GB allocation.
+        size_t grow = needed ? (size_t)needed + 0x10000 : buf.size() * 2;
+        if (grow > kMaxHandleTable) grow = kMaxHandleTable;
+        if (grow <= buf.size()) break;
+        buf.resize(grow);
     }
     if (st != 0) {
         err = fmt("NtQuerySystemInformation failed: 0x%08lX", (unsigned long)st);
@@ -334,52 +357,112 @@ bool enum_handles(uint32_t pid, const std::string& type_filter, std::vector<Hand
     }
 
     ULONG_PTR count = *(ULONG_PTR*)buf.data();
-    const uint8_t* base = buf.data() + sizeof(ULONG_PTR) * 2;
     const size_t entry_size = sizeof(SysHandleEntry);
-
-    // resolve the process once, not per handle
-    HANDLE src = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (!src) {
-        err = fmt("cannot open process %u: %s", pid, last_error_text().c_str());
+    if (buf.size() < sizeof(ULONG_PTR) * 2 ||
+        (size_t)count > (buf.size() - sizeof(ULONG_PTR) * 2) / entry_size) {
+        err = "corrupt system handle table";
         return false;
     }
-    HANDLE self = GetCurrentProcess();
 
-    // type names are expensive to query, cache them per type index
-    std::map<USHORT, std::string> type_cache;
-
-    for (ULONG_PTR i = 0; i < count && out.size() < max; ++i) {
-        const SysHandleEntry* h = (const SysHandleEntry*)(base + i * entry_size);
-        if ((uint32_t)h->pid != pid) continue;
-
-        HandleInfo info;
-        info.value = (uint64_t)h->handle;
-        info.type_index = h->type_index;
-        info.access = h->access;
-
-        // only look inside the handle if we are actually going to report it
-        HANDLE dup = nullptr;
-        if (DuplicateHandle(src, (HANDLE)h->handle, self, &dup, 0, FALSE,
-                            DUPLICATE_SAME_ACCESS)) {
-            auto it = type_cache.find(h->type_index);
-            if (it == type_cache.end()) {
-                std::string t = handle_type(dup);
-                it = type_cache.emplace(h->type_index, t).first;
-            }
-            info.type = it->second;
-            if (!want.empty() && want != "*" &&
-                to_lower(info.type).find(want) == std::string::npos) {
-                CloseHandle(dup);
-                continue;  // filter before counting towards `max`
-            }
-            info.name = handle_name(dup);
-            CloseHandle(dup);
-        } else if (!want.empty() && want != "*") {
-            continue;
+    // NtQueryObject(ObjectNameInformation) blocks forever when the handle is a
+    // synchronous pipe mid-operation - the query waits for the other end. A
+    // stuck call cannot be cancelled, so the per-handle loop runs on a worker
+    // thread and we take whatever it gathered after a timeout; the worker (and
+    // its buffer, moved into it) is simply abandoned if it never returns.
+    struct EnumState {
+        std::mutex mu;
+        std::vector<HandleInfo> list;
+        bool done = false;
+    };
+    auto shared = std::make_shared<EnumState>();
+    std::thread worker([pid, want, max, count, entry_size, table = std::move(buf), shared] {
+        const uint8_t* base = table.data() + sizeof(ULONG_PTR) * 2;
+        // resolve the process once, not per handle
+        HANDLE src = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION, FALSE, pid);
+        if (!src) {
+            std::lock_guard<std::mutex> lk(shared->mu);
+            shared->done = true;
+            return;
         }
-        out.push_back(std::move(info));
+        HANDLE self = GetCurrentProcess();
+        // type names are expensive to query, cache them per type index
+        std::map<USHORT, std::string> type_cache;
+        std::vector<HandleInfo> local;
+
+        for (ULONG_PTR i = 0; i < count && local.size() < max; ++i) {
+            const SysHandleEntry* h = (const SysHandleEntry*)(base + i * entry_size);
+            if ((uint32_t)h->pid != pid) continue;
+
+            HandleInfo info;
+            info.value = (uint64_t)h->handle;
+            info.type_index = h->type_index;
+            info.access = h->access;
+
+            // only look inside the handle if we are actually going to report it
+            HANDLE dup = nullptr;
+            if (DuplicateHandle(src, (HANDLE)h->handle, self, &dup, 0, FALSE,
+                                DUPLICATE_SAME_ACCESS)) {
+                auto it = type_cache.find(h->type_index);
+                if (it == type_cache.end()) {
+                    std::string t = handle_type(dup);
+                    it = type_cache.emplace(h->type_index, t).first;
+                }
+                info.type = it->second;
+                if (!want.empty() && want != "*" &&
+                    to_lower(info.type).find(want) == std::string::npos) {
+                    CloseHandle(dup);
+                    continue;  // filter before counting towards `max`
+                }
+                info.name = handle_name(dup);
+                CloseHandle(dup);
+            } else if (!want.empty() && want != "*") {
+                continue;
+            }
+            local.push_back(std::move(info));
+            // publish incrementally so a timeout still yields partial results
+            if (local.size() % 16 == 0) {
+                std::lock_guard<std::mutex> lk(shared->mu);
+                shared->list = local;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(shared->mu);
+            shared->list = std::move(local);
+            shared->done = true;
+        }
+        CloseHandle(src);
+    });
+
+    constexpr DWORD kTimeoutMs = 3000;
+    for (DWORD waited = 0;;) {
+        {
+            std::lock_guard<std::mutex> lk(shared->mu);
+            if (shared->done) break;
+        }
+        if (waited >= kTimeoutMs) break;
+        Sleep(25);
+        waited += 25;
     }
-    CloseHandle(src);
+    bool done = false;
+    {
+        std::lock_guard<std::mutex> lk(shared->mu);
+        done = shared->done;
+        out = std::move(shared->list);
+    }
+    if (done) {
+        worker.join();
+        return true;
+    }
+    // the worker is stuck in the kernel on some handle; keep what it published
+    worker.detach();
+    if (out.empty()) {
+        err = fmt("handle enumeration timed out after %lu ms (a handle is stuck in the kernel, "
+                  "typically a synchronous pipe)",
+                  (unsigned long)kTimeoutMs);
+        return false;
+    }
+    err = fmt("handle enumeration timed out after %lu ms; showing the first %zu entr%s",
+              (unsigned long)kTimeoutMs, out.size(), out.size() == 1 ? "y" : "ies");
     return true;
 }
 

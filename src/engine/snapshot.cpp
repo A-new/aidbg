@@ -2,6 +2,7 @@
 
 #include <compressapi.h>
 
+#include <cstddef>
 #include <cstring>
 #include <ctime>
 
@@ -22,6 +23,25 @@ bool is_all_zeros(const std::vector<uint8_t>& v) {
     for (uint8_t b : v)
         if (b) return false;
     return true;
+}
+
+// Only the documented page protection types are accepted from a snapshot
+// file. Higher flag bits (e.g. PAGE_TARGETS_INVALID reported by
+// VirtualQueryEx) are ignored rather than rejecting a legitimate snapshot.
+bool valid_protection(uint32_t p) {
+    switch (p & 0xFFu) {
+        case PAGE_NOACCESS:
+        case PAGE_READONLY:
+        case PAGE_READWRITE:
+        case PAGE_WRITECOPY:
+        case PAGE_EXECUTE:
+        case PAGE_EXECUTE_READ:
+        case PAGE_EXECUTE_READWRITE:
+        case PAGE_EXECUTE_WRITECOPY:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // Windows MS Compression (cabinet.dll): documented since Windows 8, no third
@@ -45,6 +65,10 @@ bool compress_blob(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
 }
 
 bool decompress_blob(const std::vector<uint8_t>& in, size_t raw_size, std::vector<uint8_t>& out) {
+    // raw_size comes from the (untrusted) record header. Refuse absurd sizes
+    // instead of letting a crafted file drive a huge allocation.
+    constexpr size_t kMaxRaw = 2ull * 1024 * 1024 * 1024;  // 2 GiB
+    if (raw_size > kMaxRaw) return false;
     DECOMPRESSOR_HANDLE h = nullptr;
     if (!CreateDecompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &h)) return false;
     out.resize(raw_size);
@@ -118,6 +142,12 @@ bool Snapshots::decode_pages(const std::vector<uint8_t>& payload, uint64_t raw_s
         err = "corrupt snapshot payload";
         return false;
     }
+    // Each entry has a 20-byte header. A page count that cannot possibly fit
+    // is a corrupt/hostile file, not something to reserve memory for.
+    if (n > raw.size() / 20 || n > 4000000u) {
+        err = "corrupt snapshot payload (page count)";
+        return false;
+    }
     out.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {
         SnapPage p;
@@ -127,14 +157,23 @@ bool Snapshots::decode_pages(const std::vector<uint8_t>& payload, uint64_t raw_s
             err = "corrupt snapshot payload";
             return false;
         }
+        // Validate before the data is ever handed to WriteProcessMemory or
+        // VirtualProtectEx: a crafted .snap must not become an arbitrary
+        // write / arbitrary protection primitive.
+        if (p.addr == 0 || p.addr >= kMaxAddress || size == 0 || size > 0x10000 ||
+            (dlen != 0 && dlen != size) || !valid_protection(prot)) {
+            err = "corrupt snapshot payload (bad page)";
+            return false;
+        }
         p.size = size;
-        p.protect = prot;
+        p.protect = prot & 0x7FFu;  // keep only the documented protection bits
         if (dlen) {
             if (o + dlen > raw.size()) {
                 err = "corrupt snapshot payload";
                 return false;
             }
-            p.data.assign(raw.begin() + (long)o, raw.begin() + (long)(o + dlen));
+            p.data.assign(raw.begin() + (std::ptrdiff_t)o,
+                          raw.begin() + (std::ptrdiff_t)(o + dlen));
             o += dlen;
         }
         out.push_back(std::move(p));
@@ -300,9 +339,16 @@ bool Snapshots::restore(HANDLE proc, HANDLE thread, size_t index, std::string& e
     std::map<uint64_t, SnapPage> eff;
     if (!effective_pages(index, eff, err)) return false;
 
-    // write every page back. Empty `data` pages are all zeros. Some pages are
+    // Write every page back. Empty `data` pages are all zeros. Some pages are
     // genuinely un-writable (shared data such as KUSER_SHARED_DATA), so a
     // failed page is skipped rather than aborting the restore.
+    //
+    // MEM_MAPPED pages are never written: they are views of section objects
+    // shared with the system or other processes (feature/activation-context
+    // state and friends), and a cross-process write permanently corrupts the
+    // shared view - a target restored over its mapped pages died in
+    // RtlFreeMemoryBlockLookaside during process teardown. MEM_IMAGE pages
+    // stay eligible so self-modifying code (packers) still rolls back.
     std::vector<uint8_t> zeros;
     size_t written = 0, skipped = 0;
     for (auto& kv : eff) {
@@ -318,13 +364,21 @@ bool Snapshots::restore(HANDLE proc, HANDLE thread, size_t index, std::string& e
             src = p.data.data();
             n = p.data.size();
         }
+        MemRegion preg;
+        if (!region_at(proc, p.addr, preg) || preg.type == MEM_MAPPED) {
+            ++skipped;
+            continue;
+        }
         if (!write_memory(proc, p.addr, src, n, e)) {
             ++skipped;
             continue;
         }
+        flush_icache(proc, p.addr, n);
         ++written;
-        DWORD old = 0;
-        protect_memory(proc, p.addr, p.size, p.protect, old, e);
+        // Page protections are deliberately NOT rewritten. write_memory
+        // already puts each page back to the protection it found; forcing the
+        // snapshotted value on top broke targets in other ways (a WRITECOPY
+        // page privatizes to READWRITE for good, READONLY image pages degrade).
     }
     skipped_pages_ = skipped;
     if (written == 0) {
@@ -369,6 +423,7 @@ bool Snapshots::find(const std::string& name, size_t& out) const {
 void Snapshots::drop_front() {
     if (items_.size() < 2) {
         items_.clear();
+        last_map_.clear();
         return;
     }
     // the new oldest must become self-contained: fold snapshot 0 into 1
@@ -397,6 +452,12 @@ bool Snapshots::remove(size_t index) {
     if (index >= items_.size()) return false;
     // only the newest entry can be removed without breaking the delta chain
     if (index + 1 != items_.size()) return false;
+    // the durable copy dies with it, or `snapshot history` keeps showing it
+    // and `compact` can never reclaim its bytes
+    if (store_.is_open()) {
+        std::string serr;
+        store_.mark_deleted((uint32_t)items_[index].seq, serr);  // history is best effort
+    }
     items_.pop_back();
     // the new newest is now the delta reference
     std::string err;
@@ -549,13 +610,18 @@ bool Snapshots::restore_from_store(uint32_t id, HANDLE proc, HANDLE thread, std:
             src = p.data.data();
             n = p.data.size();
         }
+        // same rules as restore(): never write MEM_MAPPED views
+        MemRegion preg;
+        if (!region_at(proc, p.addr, preg) || preg.type == MEM_MAPPED) {
+            ++skipped;
+            continue;
+        }
         if (!write_memory(proc, p.addr, src, n, e)) {
             ++skipped;
             continue;
         }
+        flush_icache(proc, p.addr, n);
         ++written;
-        DWORD old = 0;
-        protect_memory(proc, p.addr, p.size, p.protect, old, e);
     }
     skipped_pages_ = skipped;
     if (written == 0) {

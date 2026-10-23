@@ -1,7 +1,9 @@
 #include "mcp/mcp_server.h"
 
 #include <cstdio>
+#include <exception>
 #include <iostream>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,33 @@ bool a_has(const Json& args, const char* key) {
 std::string a_str(const Json& args, const char* key, const std::string& def = {}) {
     const Json& v = args.get(key);
     return v.is_null() ? def : v.as_str(def);
+}
+
+// Like a_str, but also accepts numbers and booleans. Tool clients naturally
+// send addresses as JSON numbers; a_str() alone turned those into an empty
+// string ("read <addr> <size>" with no address). Negative integers keep their
+// sign instead of wrapping to a 20-digit unsigned value.
+std::string a_text(const Json& args, const char* key, const std::string& def = {}) {
+    const Json& v = args.get(key);
+    switch (v.type()) {
+        case Json::Type::Str: return v.as_str(def);
+        case Json::Type::UInt: return std::to_string(v.as_u(0));
+        case Json::Type::Int: return std::to_string(v.as_i(0));
+        case Json::Type::Bool: return v.as_bool() ? "true" : "false";
+        default: return def;
+    }
+}
+
+// Accepts both a real boolean and the on/off strings used by the CLI.
+bool a_bool(const Json& args, const char* key, bool def) {
+    const Json& v = args.get(key);
+    if (v.type() == Json::Type::Bool) return v.as_bool(def);
+    if (v.type() == Json::Type::Str) {
+        std::string s = to_lower(v.as_str());
+        if (s == "on" || s == "true" || s == "1" || s == "yes") return true;
+        if (s == "off" || s == "false" || s == "0" || s == "no") return false;
+    }
+    return def;
 }
 
 uint64_t a_u(const Json& args, const char* key, uint64_t def = 0) {
@@ -103,18 +132,21 @@ CmdResult t_session(Engine& e, CliConfig& c, const Json& a, std::string& name) {
     if (action == "file") {
         std::string exe = a_str(a, "exe");
         if (exe.empty()) return CmdResult::fail("bad_args", "exe is required for action=file");
-        std::string line = "file " + exe;
-        std::string args = a_str(a, "args");
-        if (!args.empty()) line += " " + args;
-        return run(e, c, line, name);
+        // Set the target directly instead of building "file <path> args" and
+        // splitting it on whitespace: any path containing a space used to be
+        // cut in half, with the rest silently becoming arguments.
+        c.exe = exe;
+        c.args = a_str(a, "args");
+        return run(e, c, "file", name);
     }
     if (action == "run") {
-        std::string line = "run";
         std::string args = a_str(a, "args");
-        if (!args.empty()) line += " " + args;
-        return run(e, c, line, name);
+        if (!args.empty()) c.args = args;  // keep configured args otherwise
+        return run(e, c, "run", name);
     }
     if (action == "attach") {
+        if (!a_has(a, "pid"))
+            return CmdResult::fail("bad_args", "pid is required for action=attach");
         return run(e, c, "attach " + std::to_string(a_u(a, "pid")), name);
     }
     return run(e, c, action, name);  // detach | kill | restart | info
@@ -123,9 +155,14 @@ CmdResult t_session(Engine& e, CliConfig& c, const Json& a, std::string& name) {
 CmdResult t_execute(Engine& e, CliConfig& c, const Json& a, std::string& name) {
     std::string action = a_str(a, "action");
     if (action == "until") {
-        std::string addr = a_str(a, "address");
+        std::string addr = a_text(a, "address");
         if (addr.empty()) return CmdResult::fail("bad_args", "address is required for action=until");
         return run(e, c, "until " + addr, name);
+    }
+    if (action == "pause") {
+        std::string line = "pause";
+        if (a_has(a, "timeout_ms")) line += " " + std::to_string(a_u(a, "timeout_ms"));
+        return run(e, c, line, name);
     }
     if (action == "stepuntil" || action == "rununtil") {
         std::string cond = a_str(a, "condition");
@@ -151,24 +188,36 @@ CmdResult t_execute(Engine& e, CliConfig& c, const Json& a, std::string& name) {
 CmdResult t_breakpoint(Engine& e, CliConfig& c, const Json& a, std::string& name) {
     std::string action = a_str(a, "action");
     if (action == "list") return run(e, c, "bl", name);
+    if (action == "enable" || action == "disable" || action == "delete" ||
+        action == "condition") {
+        if (!a_has(a, "id"))
+            return CmdResult::fail("bad_args",
+                                   "id is required for action=" + action +
+                                       (action == "delete" ? " (use aidbg_command 'bc *' "
+                                                             "to delete every breakpoint)"
+                                                           : ""));
+    }
     if (action == "enable") return run(e, c, "be " + std::to_string(a_u(a, "id")), name);
     if (action == "disable") return run(e, c, "bd " + std::to_string(a_u(a, "id")), name);
-    if (action == "delete")
-        return run(e, c, a_has(a, "id") ? ("bc " + std::to_string(a_u(a, "id"))) : "bc *", name);
+    if (action == "delete") return run(e, c, "bc " + std::to_string(a_u(a, "id")), name);
     if (action == "condition") {
         std::string cond = a_str(a, "condition");
         return run(e, c, "cond " + std::to_string(a_u(a, "id")) + " " + cond, name);
     }
 
-    std::string target = a_str(a, "address");
+    std::string target = a_text(a, "address");
     if (target.empty()) target = a_str(a, "symbol");
     if (target.empty()) return CmdResult::fail("bad_args", "address or symbol is required");
 
     std::string line;
     if (action == "hardware") {
         line = "hbreak " + target;
-        if (a_has(a, "access")) line += " " + a_str(a, "access");
-        if (a_has(a, "size")) line += " " + std::to_string(a_u(a, "size"));
+        bool has_access = a_has(a, "access"), has_size = a_has(a, "size");
+        // size is positional after access; supply the default when only size
+        // is given so it does not get parsed as an access string.
+        if (has_access) line += " " + a_str(a, "access");
+        else if (has_size) line += " x";
+        if (has_size) line += " " + std::to_string(a_u(a, "size"));
     } else if (action == "memory") {
         line = "mbreak " + target + " " + std::to_string(a_u(a, "size", 4));
         if (a_has(a, "access")) line += " " + a_str(a, "access");
@@ -183,7 +232,7 @@ CmdResult t_breakpoint(Engine& e, CliConfig& c, const Json& a, std::string& name
 CmdResult t_registers(Engine& e, CliConfig& c, const Json& a, std::string& name) {
     std::string action = a_str(a, "action", "read");
     if (action == "write") {
-        return run(e, c, "setreg " + a_str(a, "name") + " " + a_str(a, "value"), name);
+        return run(e, c, "setreg " + a_str(a, "name") + " " + a_text(a, "value"), name);
     }
     std::string line = "regs";
     std::string names = a_list(a, "names");
@@ -193,40 +242,61 @@ CmdResult t_registers(Engine& e, CliConfig& c, const Json& a, std::string& name)
 
 CmdResult t_memory(Engine& e, CliConfig& c, const Json& a, std::string& name) {
     std::string action = a_str(a, "action");
-    std::string addr = a_str(a, "address");
+    std::string addr = a_text(a, "address");
 
-    if (action == "read") return run(e, c, "read " + addr + " " + std::to_string(a_u(a, "size", 64)), name);
+    if (action == "read") {
+        if (addr.empty()) return CmdResult::fail("bad_args", "address is required for action=read");
+        return run(e, c, "read " + addr + " " + std::to_string(a_u(a, "size", 64)), name);
+    }
     if (action == "dump") {
+        if (addr.empty()) return CmdResult::fail("bad_args", "address is required for action=dump");
         std::string line = "mem " + addr;
         if (a_has(a, "size")) line += " " + std::to_string(a_u(a, "size"));
         return run(e, c, line, name);
     }
-    if (action == "write")
+    if (action == "write") {
+        if (addr.empty()) return CmdResult::fail("bad_args", "address is required for action=write");
         return run(e, c, "write " + addr + " " + a_str(a, "bytes"), name);
+    }
     if (action == "search") {
-        std::string line = "search " + a_str(a, "start") + " " + a_str(a, "end") + " " +
-                           a_str(a, "pattern");
+        std::string start = a_text(a, "start"), end = a_text(a, "end");
+        std::string pattern = a_str(a, "pattern");
+        if (start.empty() || end.empty() || pattern.empty())
+            return CmdResult::fail("bad_args",
+                                   "start, end and pattern are required for action=search");
+        std::string line = "search " + start + " " + end + " " + pattern;
         if (a_has(a, "max")) line += " max=" + std::to_string(a_u(a, "max"));
         return run(e, c, line, name);
     }
     if (action == "regions") {
         std::string line = "regions";
-        if (a_has(a, "start")) line += " " + a_str(a, "start");
-        if (a_has(a, "end")) line += " " + a_str(a, "end");
+        std::string start = a_text(a, "start"), end = a_text(a, "end");
+        if (!start.empty()) line += " " + start;
+        if (!end.empty()) {
+            if (start.empty()) line += " 0";  // keep positional arguments aligned
+            line += " " + end;
+        }
         return run(e, c, line, name);
     }
     if (action == "alloc") return run(e, c, "alloc " + std::to_string(a_u(a, "size")), name);
-    if (action == "free") return run(e, c, "free " + addr, name);
-    if (action == "protect")
+    if (action == "free") {
+        if (addr.empty()) return CmdResult::fail("bad_args", "address is required for action=free");
+        return run(e, c, "free " + addr, name);
+    }
+    if (action == "protect") {
+        if (addr.empty())
+            return CmdResult::fail("bad_args", "address is required for action=protect");
         return run(e, c, "protect " + addr + " " + std::to_string(a_u(a, "size")) + " " +
                              a_str(a, "access", "rw"),
                    name);
+    }
     return CmdResult::fail("bad_args", "unknown memory action: " + action);
 }
 
 CmdResult t_disasm(Engine& e, CliConfig& c, const Json& a, std::string& name) {
     std::string line = "disasm";
-    if (a_has(a, "address")) line += " " + a_str(a, "address");
+    std::string addr = a_text(a, "address");
+    if (!addr.empty()) line += " " + addr;
     if (a_has(a, "count")) line += " " + std::to_string(a_u(a, "count"));
     return run(e, c, line, name);
 }
@@ -238,9 +308,12 @@ CmdResult t_stack(Engine& e, CliConfig& c, const Json& a, std::string& name) {
 }
 
 CmdResult t_cfg(Engine& e, CliConfig& c, const Json& a, std::string& name) {
+    // "max=N" is named so it cannot shift into the address position when the
+    // caller only passes max_blocks.
     std::string line = "flow";
-    if (a_has(a, "address")) line += " " + a_str(a, "address");
-    if (a_has(a, "max_blocks")) line += " " + std::to_string(a_u(a, "max_blocks"));
+    std::string addr = a_text(a, "address");
+    if (!addr.empty()) line += " " + addr;
+    if (a_has(a, "max_blocks")) line += " max=" + std::to_string(a_u(a, "max_blocks"));
     return run(e, c, line, name);
 }
 
@@ -251,6 +324,7 @@ CmdResult t_modules(Engine& e, CliConfig& c, const Json& a, std::string& name) {
     if (action == "symbols") {
         std::string line = "symbols";
         std::string mask = a_str(a, "mask");
+        if (mask.empty() && a_has(a, "max")) mask = "*";  // keep max in its slot
         if (!mask.empty()) line += " " + mask;
         if (a_has(a, "max")) line += " " + std::to_string(a_u(a, "max"));
         return run(e, c, line, name);
@@ -266,7 +340,8 @@ CmdResult t_exceptions(Engine& e, CliConfig& c, const Json& a, std::string& name
     std::string action = a_str(a, "action", "list");
     if (action == "list") return run(e, c, "exlist", name);
     if (action == "ignore_all")
-        return run(e, c, "exall " + a_str(a, "enabled", "off"), name);
+        return run(e, c, "exall " + std::string(a_bool(a, "enabled", false) ? "on" : "off"),
+                   name);
     if (action == "set")
         return run(e, c, "exset " + a_str(a, "code") + " " + a_str(a, "policy", "break"), name);
     if (action == "delete") return run(e, c, "exdel " + a_str(a, "code"), name);
@@ -285,9 +360,13 @@ CmdResult t_snapshot(Engine& e, CliConfig& c, const Json& a, std::string& name) 
     std::string line = "snapshot " + action;
     if (action == "save" || action == "restore" || action == "delete") {
         std::string target = a_str(a, "name");
+        // `snapshot delete` without a name would delete the newest capture
+        // (the CLI treats an empty name as "current").
+        if (action == "delete" && target.empty())
+            return CmdResult::fail("bad_args", "name is required for action=delete");
         if (!target.empty()) line += " " + target;
     } else if (action == "auto") {
-        line += " " + a_str(a, "enabled", "on");
+        line += " " + std::string(a_bool(a, "enabled", true) ? "on" : "off");
     }
     return run(e, c, line, name);
 }
@@ -314,8 +393,8 @@ Json schema_session() {
 Json schema_execute() {
     return make_schema(
         {{"action", prop_string("Execution control action",
-                                {"continue", "step", "next", "finish", "until", "stepuntil",
-                                 "rununtil", "autostep"})},
+                                {"continue", "pause", "step", "next", "finish", "until",
+                                 "stepuntil", "rununtil", "autostep"})},
          {"count", prop_number("Number of steps (step/next, default 1)")},
          {"address", prop_string("Target address or expression (action=until)")},
          {"condition", prop_string("Expression evaluated at every stop (stepuntil/rununtil)")},
@@ -511,6 +590,10 @@ Json tool_response(const CmdResult& r, const std::string& cmd_name, const Sessio
         e.set_str("message", r.err_msg);
         envelope.set("error", e);
     }
+    // Commands that have no structured data (help) only produce text; MCP
+    // callers used to receive an empty object and no way to see it. When the
+    // command already returned data, the text would just duplicate it.
+    if (r.ok && r.data.size() == 0 && !r.text.empty()) envelope.set_str("text", r.text);
     envelope.set("session", meta.to_json());
 
     Json text = Json::obj();
@@ -546,6 +629,29 @@ const ToolDef* find_tool(const std::string& name) {
     return nullptr;
 }
 
+constexpr size_t kMaxRequestBytes = 8u << 20;  // 8 MiB per JSON-RPC message
+
+// Reads one newline-delimited message without ever buffering more than `max`
+// bytes. std::getline would happily allocate a multi-gigabyte line first.
+enum class LineRead { Eof, Ok, TooLong };
+LineRead read_line_bounded(std::string& out, size_t max) {
+    out.clear();
+    char c = 0;
+    bool any = false;
+    while (std::cin.get(c)) {
+        any = true;
+        if (c == '\r') continue;
+        if (c == '\n') return LineRead::Ok;
+        if (out.size() >= max) {
+            while (std::cin.get(c) && c != '\n') {
+            }
+            return LineRead::TooLong;
+        }
+        out += c;
+    }
+    return any ? LineRead::Ok : LineRead::Eof;
+}
+
 }  // namespace
 
 int run_mcp_server(CliConfig& cfg) {
@@ -554,95 +660,158 @@ int run_mcp_server(CliConfig& cfg) {
     Output::instance().set_json(true);
 
     Engine eng;
+    // --hide was documented but ignored in MCP mode (main returned before
+    // applying it); apply it here, where the engine actually lives.
+    if (!cfg.hide_profile.empty()) {
+        if (cfg.hide_profile == "off") {
+            eng.hide.set_enabled(false);
+        } else {
+            HideConfig hc;
+            if (hide_profile_config(cfg.hide_profile, hc))
+                eng.hide.apply_config(hc, cfg.hide_profile);
+        }
+    }
     // on-hit commands run silently here (Output is quiet in MCP mode); their
     // side effects (labels, memory writes, ...) still apply
     eng.set_command_hook([&eng, &cfg](const std::string& cmd) {
         std::string cn;
         dispatch(eng, cfg, cmd, cn);
     });
+
+    bool initialized = false;
     std::string line;
-    while (std::getline(std::cin, line)) {
+    for (;;) {
+        LineRead lr = read_line_bounded(line, kMaxRequestBytes);
+        if (lr == LineRead::Eof) break;
+        if (lr == LineRead::TooLong) {
+            write_message(make_error(Json::null(), -32600, "request too large"));
+            continue;
+        }
         if (trim(line).empty()) continue;
 
-        Json req;
-        std::string perr;
-        if (!json_parse(line, req, perr)) {
-            write_message(make_error(Json::null(), -32700, "parse error: " + perr));
-            continue;
-        }
-
-        Json id = req.get("id");
-        bool is_notification = id.is_null();
-        std::string method = req.get("method").as_str();
-
-        // notifications never get a response
-        if (method == "notifications/initialized" || method == "notifications/cancelled")
-            continue;
-
-        if (method == "initialize") {
-            Json params = req.get("params");
-            std::string client_version = params.get("protocolVersion").as_str("2025-06-18");
-
-            Json caps = Json::obj();
-            caps.set("tools", Json::obj());
-            Json info = Json::obj();
-            info.set_str("name", "aidbg");
-            info.set_str("version", AIDBG_VERSION);
-
-            Json result = Json::obj();
-            result.set_str("protocolVersion", client_version);
-            result.set("capabilities", caps);
-            result.set("serverInfo", info);
-            result.set_str("instructions",
-                           "aidbg is a debugger for Windows x86/x64. Typical flow: "
-                           "aidbg_session(action=file/run) -> aidbg_execute -> inspect with "
-                           "aidbg_registers / aidbg_disasm / aidbg_stack / aidbg_memory. "
-                           "Addresses accept hex, registers, module+0xoff, module!symbol and "
-                           "expressions. Responses use a stable JSON envelope with ok/cmd/data/"
-                           "error/session.");
-            if (!is_notification) write_message(make_result(id, result));
-            continue;
-        }
-
-        if (method == "ping") {
-            if (!is_notification) write_message(make_result(id, Json::obj()));
-            continue;
-        }
-
-        if (method == "tools/list") {
-            if (!is_notification) write_message(make_result(id, tools_list_result()));
-            continue;
-        }
-
-        if (method == "tools/call") {
-            Json params = req.get("params");
-            std::string tool_name = params.get("name").as_str();
-            Json args = params.get("arguments");
-            if (args.is_null()) args = Json::obj();
-
-            const ToolDef* tool = find_tool(tool_name);
-            if (!tool) {
-                if (!is_notification)
-                    write_message(make_error(id, -32602, "unknown tool: " + tool_name));
+        try {
+            Json req;
+            std::string perr;
+            if (!json_parse(line, req, perr)) {
+                write_message(make_error(Json::null(), -32700, "parse error: " + perr));
+                continue;
+            }
+            if (req.type() != Json::Type::Obj) {
+                // A top-level array is a JSON-RPC batch. Silently treating it
+                // as a notification produced no response at all.
+                write_message(make_error(Json::null(), -32600,
+                                         "batch requests are not supported"));
                 continue;
             }
 
-            std::string cmd_name;
-            CmdResult r = tool->fn(eng, cfg, args, cmd_name);
-            if (cmd_name.empty()) {
-                r = CmdResult::fail("bad_args", "empty command");
-                cmd_name = tool_name;
+            Json id = req.get("id");
+            bool is_notification = id.is_null();
+            std::string method = req.get("method").as_str();
+            std::string jsonrpc = req.get("jsonrpc").as_str();
+            if (method.empty() || (!jsonrpc.empty() && jsonrpc != "2.0")) {
+                if (!is_notification)
+                    write_message(make_error(id, -32600, "invalid request"));
+                continue;
             }
-            if (!is_notification)
-                write_message(make_result(id, tool_response(r, cmd_name, eng.session_meta())));
-            continue;
-        }
 
-        // Unknown methods are reported, but the connection stays alive.
-        if (!is_notification) write_message(make_error(id, -32601, "method not found: " + method));
+            if (method == "notifications/initialized" || method == "notifications/cancelled") {
+                // Notifications with an id are still requests; answer them
+                // instead of dropping the id on the floor.
+                if (!is_notification) write_message(make_result(id, Json::obj()));
+                continue;
+            }
+
+            if (method == "initialize") {
+                Json params = req.get("params");
+                std::string client_version = params.get("protocolVersion").as_str();
+                // Echo only versions we actually implement. Blindly echoing
+                // whatever the client sent is not a valid negotiation.
+                std::string version = "2025-06-18";
+                if (client_version == "2024-11-05" || client_version == "2025-03-26" ||
+                    client_version == "2025-06-18")
+                    version = client_version;
+
+                Json caps = Json::obj();
+                caps.set("tools", Json::obj());
+                Json info = Json::obj();
+                info.set_str("name", "aidbg");
+                info.set_str("version", AIDBG_VERSION);
+
+                Json result = Json::obj();
+                result.set_str("protocolVersion", version);
+                result.set("capabilities", caps);
+                result.set("serverInfo", info);
+                result.set_str("instructions",
+                               "aidbg is a debugger for Windows x86/x64. Typical flow: "
+                               "aidbg_session(action=file/run) -> aidbg_execute -> inspect with "
+                               "aidbg_registers / aidbg_disasm / aidbg_stack / aidbg_memory. "
+                               "Addresses accept hex, registers, module+0xoff, module!symbol and "
+                               "expressions. Responses use a stable JSON envelope with ok/cmd/data/"
+                               "error/session.");
+                initialized = true;
+                if (!is_notification) write_message(make_result(id, result));
+                continue;
+            }
+
+            if (method == "ping") {
+                if (!is_notification) write_message(make_result(id, Json::obj()));
+                continue;
+            }
+
+            if (!initialized) {
+                if (!is_notification)
+                    write_message(make_error(id, -32002, "server not initialized"));
+                continue;
+            }
+
+            if (method == "tools/list") {
+                if (!is_notification) write_message(make_result(id, tools_list_result()));
+                continue;
+            }
+
+            if (method == "tools/call") {
+                Json params = req.get("params");
+                std::string tool_name = params.get("name").as_str();
+                Json args = params.get("arguments");
+                if (args.is_null()) args = Json::obj();
+
+                const ToolDef* tool = find_tool(tool_name);
+                if (!tool) {
+                    if (!is_notification)
+                        write_message(make_error(id, -32602, "unknown tool: " + tool_name));
+                    continue;
+                }
+
+                std::string cmd_name;
+                CmdResult r = tool->fn(eng, cfg, args, cmd_name);
+                if (cmd_name.empty()) {
+                    // Only fabricate "empty command" for a handler that
+                    // otherwise succeeded; a real bad_args message (e.g.
+                    // "exe is required") must survive.
+                    if (r.ok) r = CmdResult::fail("bad_args", "empty command");
+                    cmd_name = tool_name;
+                }
+                if (!is_notification)
+                    write_message(make_result(id, tool_response(r, cmd_name, eng.session_meta())));
+                continue;
+            }
+
+            // Unknown methods are reported, but the connection stays alive.
+            if (!is_notification)
+                write_message(make_error(id, -32601, "method not found: " + method));
+        } catch (const std::bad_alloc&) {
+            // A crafted request must not take the long-lived server down;
+            // answer it and keep serving.
+            write_message(make_error(Json::null(), -32603, "out of memory"));
+        } catch (const std::exception& ex) {
+            write_message(make_error(Json::null(), -32603,
+                                     std::string("internal error: ") + ex.what()));
+        } catch (...) {
+            write_message(make_error(Json::null(), -32603, "internal error"));
+        }
     }
 
-    if (eng.active()) {
+    if (!eng.processes().empty()) {
         std::string err;
         eng.detach(err);
     }

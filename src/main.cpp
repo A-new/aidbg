@@ -165,6 +165,21 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Validate the anti-anti-debug profile before either mode starts. MCP
+    // used to return before this was applied, silently ignoring --hide.
+    if (!hide_profile_arg.empty()) {
+        std::string name = aj::to_lower(hide_profile_arg);
+        if (name != "off") {
+            aj::HideConfig hc;
+            if (!aj::hide_profile_config(name, hc)) {
+                std::fprintf(stderr, "[error] unknown hide profile: %s\n",
+                             hide_profile_arg.c_str());
+                return 2;
+            }
+        }
+        cfg.hide_profile = name;
+    }
+
     // MCP mode owns stdout entirely: serve JSON-RPC until stdin closes.
     if (mcp_mode) return aj::run_mcp_server(cfg);
 
@@ -182,18 +197,13 @@ int main(int argc, char** argv) {
     });
 
     // anti-anti-debug profile selected on the command line
-    if (!hide_profile_arg.empty()) {
-        if (aj::to_lower(hide_profile_arg) == "off") {
+    if (!cfg.hide_profile.empty()) {
+        if (cfg.hide_profile == "off") {
             eng.hide.set_enabled(false);
         } else {
             aj::HideConfig hc;
-            if (aj::hide_profile_config(hide_profile_arg, hc)) {
-                eng.hide.apply_config(hc, aj::to_lower(hide_profile_arg));
-            } else {
-                std::fprintf(stderr, "[error] unknown hide profile: %s\n",
-                             hide_profile_arg.c_str());
-                return 2;
-            }
+            if (aj::hide_profile_config(cfg.hide_profile, hc))
+                eng.hide.apply_config(hc, cfg.hide_profile);
         }
     }
 
