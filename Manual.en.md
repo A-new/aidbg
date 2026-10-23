@@ -119,7 +119,9 @@ works too.
   process: `ps` reports `"system":true`, it never becomes `current`, and it takes no part
   in hiding, symbol loading or breakpoint planting.
 - CLI flags: `--exe` `--args` `--cwd` `--console` `--aslr` `--no-children`
-  `--hide <profile|off>` `--json` `--pretty` `-c <cmd>` `--script <file>` `--mcp`.
+  `--hide <profile|off>` `--json` `--pretty` `-c <cmd>` `--script <file>` `--mcp`
+  `--port <n>` `--bind <addr>` `--token <secret>` (the last three add the HTTP/SSE remote
+  transport to `--mcp`, see 6.1).
 
 ### 3.2 Fixed base (default)
 
@@ -355,6 +357,37 @@ Errors are two-level: command-level `ok:false` in the envelope, protocol-level J
 `error` (`-32700` parse error, `-32600` invalid request/batch, `-32601` unknown method,
 `-32602` unknown tool, `-32002` not initialized, `-32603` internal error). Notifications get
 no response (except notifications that carry an `id`).
+
+### 6.1 Remote (dual-machine) debugging: HTTP/SSE transport
+
+`--mcp --port <n>` serves HTTP alongside stdio, so an MCP client on another machine can drive
+the debugger directly (all commands are still serialized on one dispatcher thread; multiple
+clients share the same debug session):
+
+```bat
+:: target machine (where the debugger runs)
+aidbg --mcp --port 8799 --bind 0.0.0.0
+:: binding beyond loopback without --token auto-generates and prints a bearer
+:: token - copy it to the client. Explicit: --token <secret>
+```
+
+One port serves both transports, covering old and new MCP clients:
+
+| Endpoint | Transport | Notes |
+|---|---|---|
+| `GET /sse` | legacy SSE | Opens the event stream; the first `endpoint` event names the message URL (`/messages?sessionId=...`); responses arrive on the stream |
+| `POST /messages?sessionId=<id>` | legacy SSE | Submits a JSON-RPC message, returns `202`; the reply comes on the stream |
+| `POST /mcp` | streamable HTTP | Body is the JSON-RPC message; **the HTTP response is the JSON-RPC reply** |
+| `GET /` | - | health check (reports the version) |
+
+- Auth: with a token configured every request needs `Authorization: Bearer <token>`
+  (the SSE GET also accepts `?token=`). Default bind is `127.0.0.1`; `--bind 0.0.0.0`
+  **requires** a token (one is generated when none is given). A debugger can launch
+  arbitrary processes and read/write arbitrary memory - do not expose it unprotected.
+- Note: `continue` without `timeout_ms` blocks until the target stops - the HTTP request
+  stays open, exactly like stdio; remote clients should always pass a timeout and use `pause`.
+- The event stream sends a `: ping` comment every 15 s to keep intermediaries alive.
+- Stop the server by terminating the process; `detach` first, or the debuggee dies with it.
 
 ---
 

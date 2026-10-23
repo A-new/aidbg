@@ -86,13 +86,14 @@ set(AIDBG_SOURCES
   src/engine/engine.cpp
   src/cmd/commands.cpp
   src/mcp/mcp_server.cpp
+  src/mcp/sse_server.cpp
   src/host/aidbg.rc
   src/main.cpp
 )
 
 add_executable(aidbg ${AIDBG_SOURCES})
 target_include_directories(aidbg PRIVATE src third_party/zydis/include third_party/zydis/dependencies/zycore/include)
-target_link_libraries(aidbg PRIVATE Zydis dbghelp psapi advapi32 version cabinet)
+target_link_libraries(aidbg PRIVATE Zydis dbghelp psapi advapi32 version cabinet ws2_32)
 if(MSVC)
   target_link_options(aidbg PRIVATE /INCREMENTAL:NO)
 endif()

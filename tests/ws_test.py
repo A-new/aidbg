@@ -14,6 +14,9 @@ def send(line):
     proc.stdin.flush()
 
 
+events = []
+
+
 def recv(timeout=30):
     out = []
     while True:
@@ -58,10 +61,21 @@ other = next(p for p in procs if not p.get("current"))
 check("two debuggee processes", len(procs) == 2, f"{[p['name'] for p in procs]}")
 
 # --- current process must be frozen while stopped -------------------------
-a1 = cmd("read g_ticks 4")["data"]["bytes"]
+
+
+def read_ticks():
+    j = cmd("read g_ticks 4")
+    if not j["ok"] or "bytes" not in j.get("data", {}):
+        # surface the real envelope instead of crashing with a KeyError
+        check("read g_ticks works", False, json.dumps(j)[:200])
+        return None
+    return j["data"]["bytes"]
+
+
+a1 = read_ticks()
 cmd("sleep 1200")
-a2 = cmd("read g_ticks 4")["data"]["bytes"]
-check("current process frozen while stopped", a1 == a2, f"{a1} -> {a2}")
+a2 = read_ticks()
+check("current process frozen while stopped", a1 is not None and a1 == a2, f"{a1} -> {a2}")
 
 # --- the OTHER process must be frozen too, and its symbols resolve --------
 j = cmd(f"process {other['pid']}")
@@ -70,10 +84,10 @@ e = cmd("eval g_ticks")
 addr = e["data"].get("value") if e["ok"] else None
 check("per-process symbol resolves in other process", bool(addr),
       str(e.get("error", {}).get("message")))
-b1 = cmd("read g_ticks 4")["data"]["bytes"]
+b1 = read_ticks()
 cmd("sleep 1200")
-b2 = cmd("read g_ticks 4")["data"]["bytes"]
-check("other process frozen while stopped", b1 == b2, f"{b1} -> {b2}")
+b2 = read_ticks()
+check("other process frozen while stopped", b1 is not None and b1 == b2, f"{b1} -> {b2}")
 
 # --- parent and child bases differ (per-process symbol scenario) ----------
 pa = cmd("processes")  # still current=other

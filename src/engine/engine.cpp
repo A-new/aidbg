@@ -27,16 +27,25 @@ std::string module_name_from_base(HANDLE proc, uint64_t base) {
 
 // The debuggee's loader has not inserted the new module into its PEB list yet
 // while the LOAD_DLL event is being processed, so resolve the path from the
-// file handle instead - that is always available at this point.
+// file handle instead - that is always available at this point. The fixed-base
+// launch renames the image file right after CreateProcess returns, and a
+// query landing inside that rename window fails; without a path the module
+// would register into DbgHelp nameless and its symbols would never resolve,
+// so retry briefly before giving up.
 std::string path_from_file_handle(HANDLE h) {
     if (!h || h == INVALID_HANDLE_VALUE) return {};
-    wchar_t buf[MAX_PATH * 2] = {0};
-    DWORD n = GetFinalPathNameByHandleW(h, buf, MAX_PATH * 2,
-                                        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    if (!n || n >= MAX_PATH * 2) return {};
-    std::string p = to_utf8(buf);
-    if (starts_with(p, "\\\\?\\")) p = p.substr(4);
-    return p;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        wchar_t buf[MAX_PATH * 2] = {0};
+        DWORD n = GetFinalPathNameByHandleW(h, buf, MAX_PATH * 2,
+                                            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (n && n < MAX_PATH * 2) {
+            std::string p = to_utf8(buf);
+            if (starts_with(p, "\\\\?\\")) p = p.substr(4);
+            return p;
+        }
+        Sleep(10);
+    }
+    return {};
 }
 
 std::string base_name_of(const std::string& path) {
@@ -561,6 +570,14 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
     PROCESS_INFORMATION pi;
     std::memset(&pi, 0, sizeof(pi));
     std::wstring wcwd = cwd.empty() ? std::wstring() : to_wide(cwd);
+    // remember what we are launching: the CREATE_PROCESS event sometimes
+    // carries a NULL file handle, and this is then the only path source for
+    // the main module (see on_create_process)
+    {
+        wchar_t full[MAX_PATH * 2];
+        DWORD n = GetFullPathNameW(launch_exe.c_str(), MAX_PATH * 2, full, nullptr);
+        launch_exe_path_ = (n && n < MAX_PATH * 2) ? std::wstring(full) : launch_exe;
+    }
     BOOL ok = CreateProcessW(launch_exe.c_str(), cmdline.data(), nullptr, nullptr, FALSE, flags,
                              nullptr, wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
     DWORD create_err = ok ? 0 : GetLastError();
@@ -1047,6 +1064,8 @@ void Engine::on_create_process(DEBUG_EVENT& ev) {
     m.preferred_base = pe_image_base_file(i.hFile);
     m.path = path_from_file_handle(i.hFile);
     if (m.path.empty()) m.path = module_name_from_base(p.handle, m.base);
+    if (m.path.empty() && !p.is_child && !launch_exe_path_.empty())
+        m.path = to_utf8(launch_exe_path_);  // NULL hFile fallback: we know what we launched
     if (!m.preferred_base) m.preferred_base = pe_image_base_path(to_wide(m.path));
     m.name = base_name_of(m.path);
     p.modules.push_back(m);
@@ -1146,6 +1165,24 @@ void Engine::on_exit_process(DEBUG_EVENT& ev) {
 void Engine::on_load_dll(DEBUG_EVENT& ev, bool& stop) {
     ProcessInfo* p = proc_by_pid(ev.dwProcessId);
     if (!p) return;
+    // Late path resolution: a CREATE_PROCESS event with a NULL file handle
+    // (or a child whose exe was not in its PEB list yet) leaves the main
+    // module nameless, which also starves its symbol session. By the first
+    // LOAD_DLL the loader has linked the exe, so try again now.
+    if (!p->is_system && !p->modules.empty() && p->modules.front().path.empty()) {
+        std::string got = module_name_from_base(p->handle, p->modules.front().base);
+        if (!got.empty()) {
+            ModuleInfo& main = p->modules.front();
+            main.path = got;
+            main.name = base_name_of(got);
+            if (!main.preferred_base)
+                main.preferred_base = pe_image_base_path(to_wide(got));
+            p->exe_name = main.name;
+            p->exe_path = main.path;
+            std::string e2;
+            sym.load_module(p->pid, main.base, (size_t)main.size, main.path, main.name, e2);
+        }
+    }
     LOAD_DLL_DEBUG_INFO& i = ev.u.LoadDll;
     uint64_t base = (uint64_t)i.lpBaseOfDll;
     ModuleInfo m;

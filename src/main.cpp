@@ -37,6 +37,12 @@ void print_usage() {
         "  --hide <profile>    anti-anti-debug profile (basic/standard/aggressive/vmp/\n"
         "                      themida/obsidium/off, default: standard)\n"
         "  --mcp               run as an MCP server over stdio (JSON-RPC, newline delimited)\n"
+        "  --port <n>          with --mcp: also serve HTTP for remote clients - SSE transport\n"
+        "                      (GET /sse) and streamable HTTP (POST /mcp) on that port\n"
+        "  --bind <addr>       listen address for --port (default 127.0.0.1; 0.0.0.0 exposes\n"
+        "                      the debugger to the network - a token is then required)\n"
+        "  --token <secret>    bearer token required by every HTTP request; auto-generated\n"
+        "                      and printed when binding beyond loopback without one\n"
         "  --help              this text\n"
         "  --version           print version\n"
         "\n"
@@ -88,6 +94,9 @@ int main(int argc, char** argv) {
     bool pretty = false;
     bool mcp_mode = false;
     std::string hide_profile_arg;
+    uint16_t mcp_port = 0;
+    std::string mcp_bind = "127.0.0.1";
+    std::string mcp_token;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -112,6 +121,28 @@ int main(int argc, char** argv) {
             cfg.fixed_base = false;
         } else if (a == "--mcp") {
             mcp_mode = true;
+        } else if (a == "--port") {
+            std::string s;
+            if (!next(s)) {
+                std::fprintf(stderr, "[error] --port requires a value (1..65535)\n");
+                return 2;
+            }
+            uint64_t p = 0;
+            if (!aj::parse_u64(s, p) || p == 0 || p > 65535) {
+                std::fprintf(stderr, "[error] invalid port: %s\n", s.c_str());
+                return 2;
+            }
+            mcp_port = (uint16_t)p;
+        } else if (a == "--bind") {
+            if (!next(mcp_bind)) {
+                std::fprintf(stderr, "[error] --bind requires a value\n");
+                return 2;
+            }
+        } else if (a == "--token") {
+            if (!next(mcp_token)) {
+                std::fprintf(stderr, "[error] --token requires a value\n");
+                return 2;
+            }
         } else if (a == "--pretty") {
             cfg.json = true;
             pretty = true;
@@ -181,7 +212,23 @@ int main(int argc, char** argv) {
     }
 
     // MCP mode owns stdout entirely: serve JSON-RPC until stdin closes.
-    if (mcp_mode) return aj::run_mcp_server(cfg);
+    if (mcp_mode) {
+        if (mcp_port) {
+            // Exposing a debugger (arbitrary process launch, arbitrary memory
+            // read/write) to the network without a token is not acceptable:
+            // beyond loopback one is generated and printed when none was given.
+            bool loopback = aj::to_lower(mcp_bind) == "127.0.0.1" ||
+                            aj::to_lower(mcp_bind) == "localhost";
+            if (mcp_token.empty() && !loopback) {
+                mcp_token = aj::mcp_random_hex(16);
+                std::fprintf(stderr, "[aidbg] generated token (pass it to the remote client):\n"
+                                     "[aidbg]   %s\n",
+                             mcp_token.c_str());
+            }
+            return aj::run_mcp_http_server(cfg, mcp_bind, mcp_port, mcp_token);
+        }
+        return aj::run_mcp_server(cfg);
+    }
 
     aj::Output::instance().set_json(cfg.json);
     if (pretty) aj::Output::instance().set_pretty(2);

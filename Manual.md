@@ -110,7 +110,9 @@
 - `conhost.exe` 会因继承调试端口出现在会话中，但被标记为系统进程：`ps` 里带
   `"system":true`，不会成为 `current`，不参与 hide、符号加载和断点植入。
 - 命令行启动参数：`--exe` `--args` `--cwd` `--console` `--aslr` `--no-children`
-  `--hide <profile|off>` `--json` `--pretty` `-c <cmd>` `--script <file>` `--mcp`。
+  `--hide <profile|off>` `--json` `--pretty` `-c <cmd>` `--script <file>` `--mcp`
+  `--port <n>` `--bind <addr>` `--token <secret>`（后三个配合 `--mcp` 提供 HTTP/SSE
+  远程传输，见 6.1）。
 
 ### 3.2 固定基址（默认开启）
 
@@ -357,6 +359,35 @@ file crypto.dll DecryptEntry / run / break crypto.dll!key_schedule
 （`-32700` 解析失败 / `-32600` 非法请求或 batch / `-32601` 未知方法 /
 `-32602` 未知工具 / `-32002` 未初始化 / `-32603` 内部错误）。通知不返回响应（带 `id`
 的通知例外）。
+
+### 6.1 远程（双机）调试：HTTP/SSE 传输
+
+`--mcp --port <n>` 在 stdio 之外同时提供 HTTP 传输，另一台机器上的 MCP 客户端可以直接
+连接调试器（所有命令仍由单线程串行执行，多客户端共享同一个调试会话）：
+
+```bat
+:: 目标机（调试器所在机器）
+aidbg --mcp --port 8799 --bind 0.0.0.0
+:: 非回环绑定且未给 --token 时会自动生成并打印一个 Bearer 令牌，复制给客户端
+:: 显式指定：--token <secret>
+```
+
+同一端口服务两种传输，覆盖新旧 MCP 客户端：
+
+| 端点 | 传输 | 说明 |
+|---|---|---|
+| `GET /sse` | 旧版 SSE | 建立事件流；首事件 `endpoint` 给出消息入口 URL（`/messages?sessionId=...`），响应经事件流回传 |
+| `POST /messages?sessionId=<id>` | 旧版 SSE | 提交 JSON-RPC 消息，返回 `202`，响应在事件流上 |
+| `POST /mcp` | Streamable HTTP | 直接以 JSON-RPC 消息为请求体，**HTTP 响应即 JSON-RPC 响应** |
+| `GET /` | — | 健康检查（返回版本） |
+
+- 鉴权：配置令牌后所有请求需带 `Authorization: Bearer <token>`（SSE 的 GET 也可用
+  `?token=` 查询参数）。默认绑定 `127.0.0.1`；`--bind 0.0.0.0` 暴露到网络时**必须**有
+  令牌（未指定则自动生成）。调试器可以启动任意进程、读写任意内存，不要裸奔到公网。
+- 注意：不带 `timeout_ms` 的 `continue` 会阻塞到目标停下为止——HTTP 请求会一直挂着，
+  与 stdio 行为一致；远程客户端建议始终带超时并用 `pause`。
+- 事件流每 15 秒发一次 `: ping` 注释保持连接。
+- 停止服务器直接结束进程即可；退出前记得先 `detach`，否则被调试目标会一并终止。
 
 ---
 

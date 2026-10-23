@@ -654,12 +654,11 @@ LineRead read_line_bounded(std::string& out, size_t max) {
 
 }  // namespace
 
-int run_mcp_server(CliConfig& cfg) {
+void mcp_setup_engine(Engine& eng, CliConfig& cfg) {
     // stdout belongs to the protocol; direct command output must stay silent.
     Output::instance().set_quiet(true);
     Output::instance().set_json(true);
 
-    Engine eng;
     // --hide was documented but ignored in MCP mode (main returned before
     // applying it); apply it here, where the engine actually lives.
     if (!cfg.hide_profile.empty()) {
@@ -677,6 +676,126 @@ int run_mcp_server(CliConfig& cfg) {
         std::string cn;
         dispatch(eng, cfg, cmd, cn);
     });
+}
+
+Json mcp_handle_message(Engine& eng, CliConfig& cfg, const std::string& line,
+                        bool& initialized) {
+    try {
+        Json req;
+        std::string perr;
+        if (!json_parse(line, req, perr))
+            return make_error(Json::null(), -32700, "parse error: " + perr);
+        if (req.type() != Json::Type::Obj) {
+            // A top-level array is a JSON-RPC batch. Silently treating it
+            // as a notification produced no response at all.
+            return make_error(Json::null(), -32600, "batch requests are not supported");
+        }
+
+        Json id = req.get("id");
+        bool is_notification = id.is_null();
+        std::string method = req.get("method").as_str();
+        std::string jsonrpc = req.get("jsonrpc").as_str();
+        if (method.empty() || (!jsonrpc.empty() && jsonrpc != "2.0")) {
+            if (!is_notification) return make_error(id, -32600, "invalid request");
+            return Json::null();
+        }
+
+        if (method == "notifications/initialized" || method == "notifications/cancelled") {
+            // Notifications with an id are still requests; answer them
+            // instead of dropping the id on the floor.
+            if (!is_notification) return make_result(id, Json::obj());
+            return Json::null();
+        }
+
+        if (method == "initialize") {
+            Json params = req.get("params");
+            std::string client_version = params.get("protocolVersion").as_str();
+            // Echo only versions we actually implement. Blindly echoing
+            // whatever the client sent is not a valid negotiation.
+            std::string version = "2025-06-18";
+            if (client_version == "2024-11-05" || client_version == "2025-03-26" ||
+                client_version == "2025-06-18")
+                version = client_version;
+
+            Json caps = Json::obj();
+            caps.set("tools", Json::obj());
+            Json info = Json::obj();
+            info.set_str("name", "aidbg");
+            info.set_str("version", AIDBG_VERSION);
+
+            Json result = Json::obj();
+            result.set_str("protocolVersion", version);
+            result.set("capabilities", caps);
+            result.set("serverInfo", info);
+            result.set_str("instructions",
+                           "aidbg is a debugger for Windows x86/x64. Typical flow: "
+                           "aidbg_session(action=file/run) -> aidbg_execute -> inspect with "
+                           "aidbg_registers / aidbg_disasm / aidbg_stack / aidbg_memory. "
+                           "Addresses accept hex, registers, module+0xoff, module!symbol and "
+                           "expressions. Responses use a stable JSON envelope with ok/cmd/data/"
+                           "error/session.");
+            initialized = true;
+            if (!is_notification) return make_result(id, result);
+            return Json::null();
+        }
+
+        if (method == "ping") {
+            if (!is_notification) return make_result(id, Json::obj());
+            return Json::null();
+        }
+
+        if (!initialized) {
+            if (!is_notification) return make_error(id, -32002, "server not initialized");
+            return Json::null();
+        }
+
+        if (method == "tools/list") {
+            if (!is_notification) return make_result(id, tools_list_result());
+            return Json::null();
+        }
+
+        if (method == "tools/call") {
+            Json params = req.get("params");
+            std::string tool_name = params.get("name").as_str();
+            Json args = params.get("arguments");
+            if (args.is_null()) args = Json::obj();
+
+            const ToolDef* tool = find_tool(tool_name);
+            if (!tool) {
+                if (!is_notification) return make_error(id, -32602, "unknown tool: " + tool_name);
+                return Json::null();
+            }
+
+            std::string cmd_name;
+            CmdResult r = tool->fn(eng, cfg, args, cmd_name);
+            if (cmd_name.empty()) {
+                // Only fabricate "empty command" for a handler that
+                // otherwise succeeded; a real bad_args message (e.g.
+                // "exe is required") must survive.
+                if (r.ok) r = CmdResult::fail("bad_args", "empty command");
+                cmd_name = tool_name;
+            }
+            if (!is_notification)
+                return make_result(id, tool_response(r, cmd_name, eng.session_meta()));
+            return Json::null();
+        }
+
+        // Unknown methods are reported, but the connection stays alive.
+        if (!is_notification) return make_error(id, -32601, "method not found: " + method);
+        return Json::null();
+    } catch (const std::bad_alloc&) {
+        // A crafted request must not take the long-lived server down.
+        return make_error(Json::null(), -32603, "out of memory");
+    } catch (const std::exception& ex) {
+        return make_error(Json::null(), -32603, std::string("internal error: ") + ex.what());
+    } catch (...) {
+        return make_error(Json::null(), -32603, "internal error");
+    }
+}
+
+int run_mcp_server(CliConfig& cfg) {
+    Engine eng;
+    mcp_setup_engine(eng, cfg);
 
     bool initialized = false;
     std::string line;
@@ -689,126 +808,8 @@ int run_mcp_server(CliConfig& cfg) {
         }
         if (trim(line).empty()) continue;
 
-        try {
-            Json req;
-            std::string perr;
-            if (!json_parse(line, req, perr)) {
-                write_message(make_error(Json::null(), -32700, "parse error: " + perr));
-                continue;
-            }
-            if (req.type() != Json::Type::Obj) {
-                // A top-level array is a JSON-RPC batch. Silently treating it
-                // as a notification produced no response at all.
-                write_message(make_error(Json::null(), -32600,
-                                         "batch requests are not supported"));
-                continue;
-            }
-
-            Json id = req.get("id");
-            bool is_notification = id.is_null();
-            std::string method = req.get("method").as_str();
-            std::string jsonrpc = req.get("jsonrpc").as_str();
-            if (method.empty() || (!jsonrpc.empty() && jsonrpc != "2.0")) {
-                if (!is_notification)
-                    write_message(make_error(id, -32600, "invalid request"));
-                continue;
-            }
-
-            if (method == "notifications/initialized" || method == "notifications/cancelled") {
-                // Notifications with an id are still requests; answer them
-                // instead of dropping the id on the floor.
-                if (!is_notification) write_message(make_result(id, Json::obj()));
-                continue;
-            }
-
-            if (method == "initialize") {
-                Json params = req.get("params");
-                std::string client_version = params.get("protocolVersion").as_str();
-                // Echo only versions we actually implement. Blindly echoing
-                // whatever the client sent is not a valid negotiation.
-                std::string version = "2025-06-18";
-                if (client_version == "2024-11-05" || client_version == "2025-03-26" ||
-                    client_version == "2025-06-18")
-                    version = client_version;
-
-                Json caps = Json::obj();
-                caps.set("tools", Json::obj());
-                Json info = Json::obj();
-                info.set_str("name", "aidbg");
-                info.set_str("version", AIDBG_VERSION);
-
-                Json result = Json::obj();
-                result.set_str("protocolVersion", version);
-                result.set("capabilities", caps);
-                result.set("serverInfo", info);
-                result.set_str("instructions",
-                               "aidbg is a debugger for Windows x86/x64. Typical flow: "
-                               "aidbg_session(action=file/run) -> aidbg_execute -> inspect with "
-                               "aidbg_registers / aidbg_disasm / aidbg_stack / aidbg_memory. "
-                               "Addresses accept hex, registers, module+0xoff, module!symbol and "
-                               "expressions. Responses use a stable JSON envelope with ok/cmd/data/"
-                               "error/session.");
-                initialized = true;
-                if (!is_notification) write_message(make_result(id, result));
-                continue;
-            }
-
-            if (method == "ping") {
-                if (!is_notification) write_message(make_result(id, Json::obj()));
-                continue;
-            }
-
-            if (!initialized) {
-                if (!is_notification)
-                    write_message(make_error(id, -32002, "server not initialized"));
-                continue;
-            }
-
-            if (method == "tools/list") {
-                if (!is_notification) write_message(make_result(id, tools_list_result()));
-                continue;
-            }
-
-            if (method == "tools/call") {
-                Json params = req.get("params");
-                std::string tool_name = params.get("name").as_str();
-                Json args = params.get("arguments");
-                if (args.is_null()) args = Json::obj();
-
-                const ToolDef* tool = find_tool(tool_name);
-                if (!tool) {
-                    if (!is_notification)
-                        write_message(make_error(id, -32602, "unknown tool: " + tool_name));
-                    continue;
-                }
-
-                std::string cmd_name;
-                CmdResult r = tool->fn(eng, cfg, args, cmd_name);
-                if (cmd_name.empty()) {
-                    // Only fabricate "empty command" for a handler that
-                    // otherwise succeeded; a real bad_args message (e.g.
-                    // "exe is required") must survive.
-                    if (r.ok) r = CmdResult::fail("bad_args", "empty command");
-                    cmd_name = tool_name;
-                }
-                if (!is_notification)
-                    write_message(make_result(id, tool_response(r, cmd_name, eng.session_meta())));
-                continue;
-            }
-
-            // Unknown methods are reported, but the connection stays alive.
-            if (!is_notification)
-                write_message(make_error(id, -32601, "method not found: " + method));
-        } catch (const std::bad_alloc&) {
-            // A crafted request must not take the long-lived server down;
-            // answer it and keep serving.
-            write_message(make_error(Json::null(), -32603, "out of memory"));
-        } catch (const std::exception& ex) {
-            write_message(make_error(Json::null(), -32603,
-                                     std::string("internal error: ") + ex.what()));
-        } catch (...) {
-            write_message(make_error(Json::null(), -32603, "internal error"));
-        }
+        Json resp = mcp_handle_message(eng, cfg, line, initialized);
+        if (!resp.is_null()) write_message(resp);
     }
 
     if (!eng.processes().empty()) {

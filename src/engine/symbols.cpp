@@ -19,6 +19,7 @@ std::string sym_name(const SYMBOL_INFO* si) {
     if (!si) return {};
     return std::string(si->Name, si->NameLen);
 }
+
 }  // namespace
 
 bool Symbols::init(uint32_t pid, HANDLE proc, const std::string& search_path, std::string& err) {

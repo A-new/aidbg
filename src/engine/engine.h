@@ -330,6 +330,12 @@ private:
     bool has_pending_ = false;
     DWORD pending_status_ = DBG_CONTINUE;
 
+    // full path handed to CreateProcessW for the process we are launching:
+    // CREATE_PROCESS_DEBUG_INFO.hFile comes back NULL every now and then
+    // (observed on Win11), and without a fallback the main module would be
+    // registered with no path - and no symbols - for the whole session
+    std::wstring launch_exe_path_;
+
     StopInfo stop_;
     uint32_t exit_code_ = 0;
 
