@@ -1745,31 +1745,46 @@ bool Engine::snapshot_save(const std::string& name, std::string& err) {
     return capture_clean(st, name, err);
 }
 
-bool Engine::capture_clean(const CpuState& st, const std::string& name, std::string& err) {
+void Engine::lift_int3(uint32_t pid) {
     // A breakpoint parked on (at_bp_id_) is already lifted - plants say so -
-    // and stays lifted, so the snapshot holds the real byte there too.
-    struct Lifted {
-        int id;
-        uint64_t addr;  // address actually planted in this process
-    };
-    const uint32_t pid = current_pid_;
-    std::vector<Lifted> lifted;
+    // and stays lifted, so the read sees the real byte there too.
+    ProcessInfo* p = proc_by_pid(pid);
+    if (!p) return;
     std::string e2;
     for (auto& bp : bps.all()) {
         if (bp.kind != BpKind::Software) continue;
         auto it = bp.plants.find(pid);
         if (it == bp.plants.end() || !it->second.planted) continue;
-        uint64_t a = it->second.address ? it->second.address : bp.address;
-        bps.unplant_software(process(), pid, bp, e2);
-        lifted.push_back({bp.id, a});
+        bps.unplant_software(p->handle, pid, bp, e2);
+        lifted_.push_back(bp.id);
     }
     hide.lift_for_capture(pid);
-    bool ok = snaps.capture(process(), is32(), pid, st, stop_.text, name, err);
-    hide.replant_after_capture(pid);
-    for (const Lifted& lf : lifted) {
-        if (Breakpoint* bp = bps.find(lf.id))
-            bps.plant_software(process(), pid, *bp, e2, lf.addr);
+}
+
+void Engine::replant_int3(uint32_t pid) {
+    ProcessInfo* p = proc_by_pid(pid);
+    if (!p) {
+        lifted_.clear();
+        return;
     }
+    std::string e2;
+    for (int id : lifted_) {
+        if (Breakpoint* bp = bps.find(id)) {
+            auto it = bp->plants.find(pid);
+            uint64_t a = (it != bp->plants.end() && it->second.address) ? it->second.address
+                                                                        : bp->address;
+            bps.plant_software(p->handle, pid, *bp, e2, a);
+        }
+    }
+    lifted_.clear();
+    hide.replant_after_capture(pid);
+}
+
+bool Engine::capture_clean(const CpuState& st, const std::string& name, std::string& err) {
+    const uint32_t pid = current_pid_;
+    lift_int3(pid);
+    bool ok = snaps.capture(process(), is32(), pid, st, stop_.text, name, err);
+    replant_int3(pid);
     return ok;
 }
 

@@ -227,6 +227,13 @@ public:
     // `list.head->value`. Falls back to plain evaluation when no type matches.
     bool typed_eval(const std::string& expr, TypedValue& out, std::string& err);
 
+    // ---- byte-exact memory reads (dump / snapshot capture) ----
+    // Lifts/replants every INT3 of `pid` around a byte-exact read of its
+    // memory (used by snapshot capture and by dump). replant_int3() restores
+    // what lift_int3() removed.
+    void lift_int3(uint32_t pid);
+    void replant_int3(uint32_t pid);
+
     // ---- snapshots / reverse execution ----
     bool snapshot_save(const std::string& name, std::string& err);
     bool snapshot_restore(const std::string& name, std::string& err);
@@ -292,7 +299,9 @@ private:
     // Snapshot capture must read the real instruction bytes: every planted
     // INT3 (user software breakpoints and the hider's ntdll hooks) is lifted
     // for the read and put back afterwards, or a restored 0xCC whose
-    // breakpoint no longer exists would surface as a stray exception.
+    // breakpoint no longer exists would surface as a stray exception. The
+    // same discipline applies to `dump` - a dumped image carrying a planted
+    // INT3 crashes as soon as it runs.
     bool capture_clean(const CpuState& st, const std::string& name, std::string& err);
     // Re-arms every kind of breakpoint after a snapshot overwrote the
     // process's memory, and parks on a breakpoint at the restored RIP.
@@ -368,6 +377,9 @@ private:
     // pid of the process Engine::pause injected DebugBreakProcess into: its
     // breakpoint must surface even while child loader breaks are being skipped
     uint32_t expecting_break_pid_ = 0;
+
+    // software breakpoint ids lifted by the current lift_int3()/replant pair
+    std::vector<int> lifted_;
 };
 
 }  // namespace aj

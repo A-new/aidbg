@@ -239,8 +239,29 @@ Write `max=N` explicitly so it cannot be confused with hex bytes.
 | `exports [module] [mask]` | parse the export directory from target memory |
 | `imports <addr> [count]` | pointer run -> `module!function` (IAT analysis) |
 | `iat scan/map/refs/fix/trace` | locate import slots, group by module, find code references, **rebuild the IAT**, trace where an import call lands |
-| `dump <file> [addr] [entry=] [compact] [keepbase]` | dump the in-memory image as a loadable PE |
+| `dump <file> [addr] [entry=] [compact] [keepbase] [noiat]` | dump the in-memory image as a loadable PE (import table and relocations repaired, see below) |
 | `ptype` / `whatis` / `print` | PDB type layouts / declared types / typed evaluation (`.` `->` `[]`) |
+
+#### dump: import table and relocation repair
+
+- **Imports**: the in-memory import directory is validated first; when intact
+  (ordinary DLLs/EXEs, unpacked) it is kept as dumped - the loader resolves
+  names on its own. When the directory is destroyed (packers, IATs rebuilt by
+  VMProtect-style dispatchers), import pointer runs in the data sections are
+  scanned, grouped per module, and a fresh descriptor + name table is appended
+  as an `aidbgIAT` section whose `FirstThunk` points back at the original
+  slots - the loader then resolves names into exactly the locations the code
+  reads. `noiat` disables the repair.
+- **Relocations** (`keepbase`): ImageBase is restored to the preferred base
+  and the loader's slide is subtracted from every relocated pointer listed in
+  `.reloc`, producing a relocatable image again (ASLR bit kept). When the
+  packer stripped `.reloc`, the dump falls back to pinning the runtime base
+  with ASLR cleared and says so.
+- **INT3 lifting**: every planted INT3 (user breakpoints, hide hooks) is
+  lifted around the read and replanted afterwards - otherwise the dumped file
+  ships with 0xCC bytes and crashes the moment it runs.
+- The default (without `keepbase`) still pins the runtime base and clears
+  ASLR, so the file maps exactly where it was captured.
 
 `peb` self-checks `ImageBaseAddress` against the main module base. On WOW64 targets
 `teb.peb` and `peb` may differ (dual TEBs) - the output flags it with `[!]`; core fields stay

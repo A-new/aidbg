@@ -47,7 +47,8 @@ Output is always `build\aidbg.exe`.
 src/
   main.cpp             CLI entry: -c / --script / interactive / --mcp; --hide/--aslr flags
   cmd/commands.cpp     command registration, parsing, dispatch (70+ commands)
-  mcp/mcp_server.cpp   MCP server (13 tools, same envelopes as the CLI)
+  mcp/mcp_server.cpp   MCP server (13 tools, same envelopes as the CLI; stdio)
+  mcp/sse_server.cpp   MCP over HTTP: SSE + streamable HTTP transports (remote debugging)
   output/output.cpp    JSON/text output layer (events, envelopes, quiet mode)
   engine/
     engine.cpp         debug event loop, process/thread/module mgmt, execution, fixed base

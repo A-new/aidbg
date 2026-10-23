@@ -1789,59 +1789,6 @@ CmdResult cmd_handles(Engine& e, CliConfig&, const std::vector<std::string>& a) 
 
 // ------------------------------------------------------------------- dump
 
-CmdResult cmd_dump(Engine& e, CliConfig&, const std::vector<std::string>& a) {
-    if (!need_args(a, 1, "dump <file> [addr] [entry=<addr>] [compact] [keepbase]"))
-        return fail("bad_args", "dump <file> [addr] [entry=<addr>] [compact] [keepbase]");
-    if (!e.is_paused()) return fail("not_paused", "target is not paused");
-
-    std::string path = a[0];
-    uint64_t base = 0;
-    size_t idx = 1;
-    if (idx < a.size() && a[idx].find('=') == std::string::npos && a[idx] != "compact" &&
-        a[idx] != "keepbase") {
-        CmdResult dummy;
-        if (!resolve(e, a[idx], base, dummy)) return dummy;
-        ++idx;
-    }
-    if (!base) {
-        if (e.modules().empty()) return fail("no_target", "no modules loaded");
-        base = e.modules().front().base;
-    }
-
-    DumpOptions opts;
-    for (; idx < a.size(); ++idx) {
-        const std::string& t = a[idx];
-        if (t == "compact") {
-            opts.compact = true;
-        } else if (t == "keepbase") {
-            opts.pin_image_base = false;
-        } else if (starts_with(t, "entry=")) {
-            CmdResult dummy;
-            if (!resolve(e, t.substr(6), opts.entry_point, dummy))
-                return fail("bad_args", "bad entry address");
-        } else {
-            return fail("bad_args", "unknown option: " + t);
-        }
-    }
-
-    Json report;
-    std::string err;
-    if (!dump_pe(e.process(), base, path, opts, report, err))
-        return fail("dump_failed", err);
-
-    std::string t = fmt("dumped %s\n", path.c_str());
-    t += fmt("  base           %s\n", hex8(base).c_str());
-    t += fmt("  file size      %llu bytes\n", (unsigned long long)report.get("file_size").as_u());
-    t += fmt("  size of image  %llu\n", (unsigned long long)report.get("size_of_image").as_u());
-    t += fmt("  sections       %llu\n", (unsigned long long)report.get("sections").as_u());
-    if (opts.entry_point) t += fmt("  entry point    %s\n", hex8(opts.entry_point).c_str());
-    t += fmt("  image base     %s\n", opts.pin_image_base ? "pinned to the load address"
-                                                          : "left as in the original");
-    return ok(report, t);
-}
-
-// ------------------------------------------- import table / export resolution
-
 // Caches parsed export tables while walking an IAT, so a large import region
 // does not re-parse the same module over and over.
 struct ExportCache {
@@ -1893,6 +1840,127 @@ bool resolve_import_slot(Engine& e, ExportCache& cache, uint64_t value, std::str
     function = fmt("+0x%llx", (unsigned long long)(addr - m->base));
     return true;
 }
+
+CmdResult cmd_dump(Engine& e, CliConfig&, const std::vector<std::string>& a) {
+    if (!need_args(a, 1, "dump <file> [addr] [entry=<addr>] [compact] [keepbase] [noiat]"))
+        return fail("bad_args",
+                    "dump <file> [addr] [entry=<addr>] [compact] [keepbase] [noiat]");
+    if (!e.is_paused()) return fail("not_paused", "target is not paused");
+
+    std::string path = a[0];
+    uint64_t base = 0;
+    size_t idx = 1;
+    if (idx < a.size() && a[idx].find('=') == std::string::npos && a[idx] != "compact" &&
+        a[idx] != "keepbase" && a[idx] != "noiat") {
+        CmdResult dummy;
+        if (!resolve(e, a[idx], base, dummy)) return dummy;
+        ++idx;
+    }
+    if (!base) {
+        if (e.modules().empty()) return fail("no_target", "no modules loaded");
+        base = e.modules().front().base;
+    }
+
+    DumpOptions opts;
+    const ModuleInfo* mod = e.module_at(base);
+    if (mod) opts.preferred_base = mod->preferred_base;
+    // the module's owning process (dumping a child's module must read that
+    // child's memory, not the current process's). The current process wins
+    // when several debuggees map a module at the same base (system DLLs do).
+    HANDLE dump_proc = e.process();
+    uint32_t dump_pid = 0;
+    if (mod) {
+        for (auto& p : e.processes()) {
+            bool has = false;
+            for (auto& m : p.modules) has = has || m.base == base;
+            if (!has) continue;
+            if (p.pid == e.pid()) {
+                dump_pid = p.pid;
+                dump_proc = p.handle;
+                break;
+            }
+            if (!dump_pid) {
+                dump_pid = p.pid;
+                dump_proc = p.handle;
+            }
+        }
+    }
+    for (; idx < a.size(); ++idx) {
+        const std::string& t = a[idx];
+        if (t == "compact") {
+            opts.compact = true;
+        } else if (t == "keepbase") {
+            opts.pin_image_base = false;
+        } else if (t == "noiat") {
+            opts.fix_iat = false;
+        } else if (starts_with(t, "entry=")) {
+            CmdResult dummy;
+            if (!resolve(e, t.substr(6), opts.entry_point, dummy))
+                return fail("bad_args", "bad entry address");
+        } else {
+            return fail("bad_args", "unknown option: " + t);
+        }
+    }
+
+    // import repair: resolve dumped pointers against every loaded module's
+    // export table (pointers into the dumped module itself are not imports)
+    ExportCache cache{e};
+    const uint64_t img_end = base + (mod ? mod->size : 0);
+    opts.resolve_import = [&e, &cache, base, img_end](uint64_t value, std::string& module,
+                                                      std::string& func, uint64_t& ordinal) {
+        if (value >= base && value < img_end) return false;  // self-reference
+        std::string fwd;
+        if (!resolve_import_slot(e, cache, value, module, func, ordinal, fwd)) return false;
+        if (func.find("+0x") != std::string::npos) return false;  // not an exact export
+        if (!func.empty() && func[0] == '#') func.clear();  // "#ord" -> ordinal import
+        return true;
+    };
+
+    Json report;
+    std::string err;
+    // The dump must hold real instruction bytes: any planted INT3 (user
+    // breakpoints still armed elsewhere in the image, hide hooks) would ship
+    // inside the file and crash it the moment it runs.
+    if (dump_pid) e.lift_int3(dump_pid);
+    const bool dumped = dump_pe(dump_proc, base, path, opts, report, err);
+    if (dump_pid) e.replant_int3(dump_pid);
+    if (!dumped) return fail("dump_failed", err);
+
+    std::string t = fmt("dumped %s\n", path.c_str());
+    t += fmt("  base           %s\n", hex8(base).c_str());
+    t += fmt("  file size      %llu bytes\n", (unsigned long long)report.get("file_size").as_u());
+    t += fmt("  size of image  %llu\n", (unsigned long long)report.get("size_of_image").as_u());
+    t += fmt("  sections       %llu\n", (unsigned long long)report.get("sections").as_u());
+    if (opts.entry_point) t += fmt("  entry point    %s\n", hex8(opts.entry_point).c_str());
+    t += fmt("  image base     %s\n", opts.pin_image_base ? "pinned to the load address"
+                                                          : "restored to the preferred base");
+    if (report.has("relocation")) {
+        const Json& r = report.get("relocation");
+        if (r.has("entries_unrelocated"))
+            t += fmt("  relocations    %llu un-applied (slide %s)\n",
+                     (unsigned long long)r.get("entries_unrelocated").as_u(),
+                     r.get("slide").as_str().c_str());
+        else if (r.has("note"))
+            t += fmt("  relocations    %s\n", r.get("note").as_str().c_str());
+    }
+    if (report.has("imports")) {
+        const Json& r = report.get("imports");
+        if (r.has("module_count"))
+            t += fmt("  imports        rebuilt: %llu module(s), %llu thunk(s)%s\n",
+                     (unsigned long long)r.get("module_count").as_u(),
+                     (unsigned long long)r.get("thunks").as_u(),
+                     r.get("singles_skipped").as_u() ? fmt(", %llu lone pointer(s) skipped",
+                                                           (unsigned long long)r.get(
+                                                               "singles_skipped").as_u())
+                                                     .c_str()
+                                                     : "");
+        else if (r.has("note"))
+            t += fmt("  imports        %s\n", r.get("note").as_str().c_str());
+    }
+    return ok(report, t);
+}
+
+// ------------------------------------------- import table / export resolution
 
 CmdResult cmd_exports(Engine& e, CliConfig&, const std::vector<std::string>& a) {
     if (!e.is_paused()) return fail("not_paused", "target is not paused");
@@ -2623,7 +2691,7 @@ const CmdSpec kCmds[] = {
     {"exports", "", "exports [module] [mask] [max]", "list a module's exports, parsed from the target's memory", true, true, cmd_exports},
     {"imports", "", "imports <addr> [count]", "resolve a run of pointers to module!function (IAT analysis)", true, true, cmd_imports},
     {"iat", "", "iat [scan [start end] | map <addr> [count] | refs <start> <end> | fix <start> <end> [newva]]", "find, analyse and rebuild import tables", true, true, cmd_iat},
-    {"dump", "", "dump <file> [addr] [entry=<addr>] [compact] [keepbase]", "write the in-memory image out as a loadable PE file", true, true, cmd_dump},
+    {"dump", "", "dump <file> [addr] [entry=<addr>] [compact] [keepbase] [noiat]", "write the in-memory image out as a loadable PE file; rebuilds the import table, keepbase also restores relocations", true, true, cmd_dump},
     {"snapshot", "snap", "snapshot [save [name] | restore [name|index] | list | delete | clear | auto <on|off> | file [path] | history | load <id> | compact]",
      "save/restore process state; all snapshots live in one container file", false, false, cmd_snapshot},
     {"stepback", "sbk,reverse,dbk,debugback", "stepback [count]", "return to an earlier snapshot", true, true, cmd_stepback},

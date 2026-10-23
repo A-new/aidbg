@@ -4,6 +4,12 @@
 //
 // Bump it on every published update; each released build gets its own GitHub
 // release (tag v<major.minor.patch>) instead of reusing an old one.
+//   0.3.3  dump repairs: import table rebuilt (Scylla-style, appended
+//          aidbgIAT section) when the original is destroyed; keepbase
+//          restores the preferred base and un-applies relocations (pointer-
+//          width entries only, page-offset-0 targets included); planted
+//          INT3s lifted around the read; fixed Section/FileAlignment header
+//          offsets (were reading Subsystem/Win32Version values)
 //   0.3.2  MCP over HTTP for remote (dual-machine) debugging: legacy SSE
 //          transport (GET /sse) + streamable HTTP (POST /mcp) on --port,
 //          --bind / --token with auto-generated bearer token beyond loopback
@@ -19,4 +25,4 @@
 //          fixed-base crash recovery, user-bp priority over hide hooks, misc
 //   0.2.0  fixed-base rename-swap launch, notes/labels, bpcmd, bpload, XMM
 //   0.1.0  initial release
-#define AIDBG_VERSION "0.3.2"
+#define AIDBG_VERSION "0.3.3"

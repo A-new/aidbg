@@ -225,8 +225,22 @@ autostep 14                       # 记录接下来 14 条实际执行的指令
 | `iat refs <start> <end>` | 扫描代码中的导入引用（`call/jmp/mov/lea [rip+x]`） |
 | `iat fix <start> <end> [newva]` | 重建导入表并改写引用（内存中修复 IAT） |
 | `iat trace <addr> [max_steps]` | 追踪一次导入调用最终落到哪个 API |
-| `dump <file> [addr] [entry=<addr>] [compact] [keepbase]` | 内存镜像导出为可加载 PE |
+| `dump <file> [addr] [entry=<addr>] [compact] [keepbase] [noiat]` | 内存镜像导出为可加载 PE（自动修复导入表与重定位，见下） |
 | `ptype <type>` / `whatis <symbol>` / `print <expression>` | PDB 类型布局 / 声明类型 / 带类型求值（`.` `->` `[]` 成员访问） |
+
+#### dump 的导入表与重定位修复
+
+- **导入表**：先校验内存中的原导入目录；完好（普通 DLL/EXE、未加壳）则原样保留——
+  加载器自己就能按名字解析。原目录损坏/丢失（加壳、IAT 被 VMProtect 派发器重建）时，
+  自动扫描数据节的导入指针序列，按模块分组重建 `IMAGE_IMPORT_DESCRIPTOR` + 名称表，
+  追加 `aidbgIAT` 节并让 `FirstThunk` 指回原槽位——加载器会把名字解析回代码实际读取的
+  位置。`noiat` 关闭该修复。
+- **重定位**（`keepbase`）：把 `ImageBase` 恢复为 preferred 基址，并按 `.reloc` 把加载器
+  施加的位移从每个已重定位指针中减去，导出重新可重定位的镜像（保留 ASLR 位）。
+  `.reloc` 被壳抹掉时退回"钉在运行基址 + 关 ASLR"并给出提示。
+- **INT3 拓印**：dump 前自动摘除镜像内所有已植入的 INT3（用户断点与 hide 钩子），
+  dump 后原样种回——否则导出文件带着 0xCC 一运行就崩。
+- 默认（不带 `keepbase`）仍是"钉在运行基址 + 关 ASLR"（加载器直接映射原地址）。
 
 `peb` 会自校验 `ImageBaseAddress` 与主模块基址一致；`NtGlobalFlag` 的 `0x70` 是附加
 调试器的典型痕迹。x86(WOW64) 的 `teb.peb` 与 `peb` 可能不一致（双 TEB），输出用 `[!]`

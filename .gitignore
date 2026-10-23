@@ -14,6 +14,7 @@
 *.log
 *.err
 tests/out_*.txt
+tests/out_*.exe
 tests/probe_*.txt
 tests/probe_out*.txt
 tests/notes_test.json
@@ -24,3 +25,4 @@ tests/*.noaslr.exe
 # local notes / scratch
 *.aidbg-notes.json
 问题.md
+drmemory.md

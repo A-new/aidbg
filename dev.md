@@ -44,7 +44,8 @@ build.bat Release
 src/
   main.cpp             CLI 入口：-c / --script / 交互 / --mcp；--hide/--aslr 等参数
   cmd/commands.cpp     命令注册、解析与分发（70+ 命令）
-  mcp/mcp_server.cpp   MCP 服务器（13 工具，信封与 CLI 一致）
+  mcp/mcp_server.cpp   MCP 服务器（13 工具，信封与 CLI 一致；stdio 传输）
+  mcp/sse_server.cpp   MCP over HTTP：SSE + Streamable HTTP 双传输（远程双机调试）
   output/output.cpp    JSON/文本双格式输出层（事件、信封、quiet 模式）
   engine/
     engine.cpp         调试事件循环、进程/线程/模块、执行控制、固定基址
@@ -169,6 +170,26 @@ MoveFileEx(0)。暂存名每次唯一，避免“上一次的补丁映像仍被�
 DLL 的固定基址交换保持到 LOAD_DLL 映射完成才还原（`dll_patch_` 成员）。
 约定：export 按 rundll32 签名调用；找不到 export 时 stub 退出码 3（不空转）。
 
+### 4.5 dump 修复：原表优先，重建兜底（Scylla 语义）
+
+1. **导入表**：先校验内存原导入目录（descriptor 链、thunk、hint/name 全可读）；
+   完好则原样保留——加载器自解析比任何合成表可靠（实测 28 段碎片化重建表会让
+   loader 崩在 RtlInsertElementGenericTable 路径，结构校验全过也无解）。损坏才扫描
+   重建：`FirstThunk` 指回原槽位（加载器把名字解析回代码实际读取的位置），新表放
+   追加的 `aidbgIAT` 节。
+2. **重定位**：`keepbase` 恢复 preferred ImageBase 并按 `.reloc` 逐项减 slide；
+   `.reloc` 缺失退回钉基址。**顺序关键**：导入扫描必须先于重定位还原——扫描按
+   运行时地址解析指针，还原后指针变成 preferred 形态就解析不出了。
+3. **INT3 拓印**：dump 前后用 `lift_int3`/`replant_int3`（与快照捕获共用）摘/种
+   镜像内全部 INT3，否则导出文件带着 0xCC 一运行即崩。
+
+### 4.6 MCP HTTP 传输：单调度线程
+
+`--port` 同时服务旧版 SSE（`GET /sse` + `POST /messages?sessionId=`）与新版
+Streamable HTTP（`POST /mcp`，HTTP 响应即 JSON-RPC 响应）。Engine 非线程安全，
+所有 JSON-RPC 由主线程调度器串行执行；socket 线程只搬运字节，回复经互斥队列/条件
+变量回传。非回环绑定强制 Bearer 令牌（未提供则生成并打印）。
+
 ## 5. 测试
 
 - **测试目标**（`tests/`，均带 PDB）：`target.exe`（x64）、`target32.exe`、`spawner.exe`
@@ -178,6 +199,12 @@ DLL 的固定基址交换保持到 LOAD_DLL 映射完成才还原（`dll_patch_`
 - **回归脚本**（`*.ajs`，`--script` 驱动）：`hide_std`（hide 矩阵）、`reg_basic`、
   `reg_children`、`reg_types`、`fixbase`、`dlltest` 等。判定标准：目标输出文件内容 +
   JSON 日志无意外 `"ok":false` + 进程正常退出。
+- **交互式回归**（python 驱动，需动态取 pid/基址的场景）：
+  `tests/ws_test.py`（多进程 world-stop + 按进程符号，依赖 `tests/tickpair.exe`）、
+  `tests/http_mcp_test.py`（MCP HTTP/SSE 端到端 16 项）、
+  `tests/reloc_test.py`（dump 重定位还原）、
+  `tests/iat_reloc_test.py`（非零 slide + 损坏导入表的重建组合）；
+  `tests/load_dll.exe`（配 `mk_dumpfix.bat` 构建）加载 dump 并调用导出做端到端验证。
 - 修 bug 必须配可复现脚本；注意 `Start-Process` 不给含空格参数加引号（测试脚本里用
   内嵌引号或脚本文件传参）。
 - **会话/MCP 回归关注点**（本轮修复对应）：
@@ -240,3 +267,18 @@ DLL 的固定基址交换保持到 LOAD_DLL 映射完成才还原（`dll_patch_`
 
 **文档导航** [README](README.md) | [Manual](Manual.md) | [dev](dev.md) ·
 [English](dev.en.md)
+
+
+## 8. 路线图（调研素材见本地 `drmemory.md`，随仓库不入库）
+
+按价值/成本排序的候选方向（详细做法笔记在 `drmemory.md`）：
+
+1. **堆分配追踪**（heaptrace/allocinfo）：复用 hide L2 的 hook 骨架虚拟化
+   RtlAllocateHeap/RtlFreeHeap，{地址,大小,调用栈} 记账——逆向与崩溃分析高频需求；
+   注意 pre_us 标记（attach 前已存在的分配）。
+2. **UAF 检测（memcheck-lite）**：释放填特征字节 + FIFO 延迟隔离区（双阈值），
+   命中访问异常时报"UAF，释放点调用栈"。
+3. **符号缓存**：按模块（size+timestamp 键）把 DbgHelp 解析结果落盘，重复会话
+   秒开——独立速赢。
+4. **泄漏扫描/句柄追踪**：退出时三分类（reachable/possibly/definitely lost）+
+   句柄创建/关闭配对，作为 `memcheck` 报告层；配套 suppress 通配符格式。
