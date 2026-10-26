@@ -12,17 +12,24 @@ Addresses accept expressions everywhere (see SKILL.md). Aliases in parentheses.
 | `processes\|ps`, `process\|proc <pid>` | all processes in the session (children included) |
 | `info`, `version`, `help` | session state / version / machine-readable catalog |
 
-CLI flags: `--json --pretty --exe --args --cwd --console --aslr --no-children --hide <profile|off> -c <line> --script <file> --mcp`.
+CLI flags: `--json --pretty --exe --args --cwd --console --aslr --no-children --hide <profile|off> -c <line> --script <file> --mcp [--port <n> --bind <addr> --token <bearer>]`
+(`--port` switches MCP to HTTP - SSE + streamable HTTP - for remote/dual-machine
+debugging; beyond loopback a bearer token is required and auto-generated).
+
+Stopping on any process world-stops every debuggee in the session (children included,
+mixed x86/x64), so reads while paused are consistent process-wide.
 
 ## Execution
 | Command | Notes |
 |---|---|
 | `continue\|c\|g [timeout_ms]` | resume; timeout returns `timeout` |
+| `pause\|break-in [timeout_ms]` | interrupt a running target (inject a break) |
 | `step\|si [n]` / `next\|n\|so [n]` | into / over calls |
 | `finish\|gu` / `until <expr>` | to function return / to address |
 | `stepuntil\|tu <cond> [max=N]` | step until true (evaluated per step) |
 | `rununtil\|ru <cond> [max=N]` | run until true (evaluated per stop) |
 | `autostep\|astep <n> [delay_ms]` | record the executed instruction trace |
+| `sleep\|wait <ms>` | pause the debugger (not the target) - script timing |
 
 ## Breakpoints
 | Command | Notes |
@@ -56,7 +63,7 @@ CLI flags: `--json --pretty --exe --args --cwd --console --aslr --no-children --
 | `exports [module] [mask]` | export directory from target memory |
 | `imports <addr> [n]` | pointer run -> module!function |
 | `iat scan/map/refs/fix/trace` | find IAT slots, group, find code refs, rebuild IAT, trace an import call |
-| `dump <file> [addr] [entry=] [compact] [keepbase]` | dump in-memory image as a runnable PE |
+| `dump <file> [addr] [entry=] [compact] [keepbase] [noiat]` | dump in-memory image as a runnable PE; `noiat` skips the import-table rebuild |
 | `ptype <type>`, `whatis <sym>`, `print <expr>` | PDB types; `print` supports `.` `->` `[]` |
 
 ## Snapshots

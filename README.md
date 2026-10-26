@@ -65,6 +65,7 @@ aidbg --json ^
 |---|---|
 | [Manual.md](Manual.md) · [Manual.en.md](Manual.en.md) | **AI / 脚本作者**：输出契约、表达式、全部命令、工作流 |
 | [dev.md](dev.md) · [dev.en.md](dev.en.md) | **开发者**：构建、架构、设计决策、测试与发布 |
+| [skills/aidbg](skills/aidbg) | **AI agent 技能包**：把 `skills/aidbg` 目录拷到 `.claude/skills/aidbg`（或其他 agent 的 skills 目录），即可让 Claude 等 agent 按本手册驱动调试器 |
 
 ### 致谢
 

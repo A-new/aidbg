@@ -2690,7 +2690,7 @@ const CmdSpec kCmds[] = {
     {"eval", "?", "eval <expression>", "evaluate an expression", true, false, cmd_eval},
     {"exports", "", "exports [module] [mask] [max]", "list a module's exports, parsed from the target's memory", true, true, cmd_exports},
     {"imports", "", "imports <addr> [count]", "resolve a run of pointers to module!function (IAT analysis)", true, true, cmd_imports},
-    {"iat", "", "iat [scan [start end] | map <addr> [count] | refs <start> <end> | fix <start> <end> [newva]]", "find, analyse and rebuild import tables", true, true, cmd_iat},
+    {"iat", "", "iat [scan [start end] | map <addr> [count] | refs <start> <end> | fix <start> <end> [newva] | trace <addr> [max_steps]]", "find, analyse and rebuild import tables", true, true, cmd_iat},
     {"dump", "", "dump <file> [addr] [entry=<addr>] [compact] [keepbase] [noiat]", "write the in-memory image out as a loadable PE file; rebuilds the import table, keepbase also restores relocations", true, true, cmd_dump},
     {"snapshot", "snap", "snapshot [save [name] | restore [name|index] | list | delete | clear | auto <on|off> | file [path] | history | load <id> | compact]",
      "save/restore process state; all snapshots live in one container file", false, false, cmd_snapshot},

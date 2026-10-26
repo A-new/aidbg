@@ -13,8 +13,10 @@ description: |
 # aidbg
 
 aidbg is an AI-first command line debugger: every command can emit one line of JSON
-(`--json`), so drive it in batches and parse the envelopes. Full command reference:
-`references/commands.md`. Deep manual: the repo's `Manual.md`.
+(`--json`), so drive it in batches and parse the envelopes. Drive it with `-c` lines,
+`--script` files, or MCP (`--mcp` stdio; `--port`/`--bind`/`--token` serve MCP over HTTP
+to remote-control a debugger on another machine). Full command reference:
+`references/commands.md`. Deep manual: `Manual.md` in the aidbg repo.
 
 ## Inputs to collect
 
@@ -56,8 +58,8 @@ aidbg is an AI-first command line debugger: every command can emit one line of J
    **Counting function calls / capturing arguments**: set one breakpoint at the function
    entry (read `rcx`/`rdx`/`r8`/`r9` for args) and one at its `ret` (read `rax`), then use
    plain `continue` between hits and finish with `bl` (`hit_count` is the authority).
-   Prefer this over `finish`/`step` when counting: a parked software breakpoint is
-   currently not re-planted after `finish`, so hits can be missed.
+   Parked breakpoints are re-planted after `finish`/`next`/`until`, so interleaving those
+   with hits is safe too.
 
 5. **Bound output**: `mem` defaults to 64 bytes; lists take `max=N`; `search` requires
    `max=N` written explicitly.
@@ -89,7 +91,10 @@ aidbg is an AI-first command line debugger: every command can emit one line of J
 | `unknown_type` / `no_type` | try `whatis`, or plain `eval`; PDB may be missing |
 | `condition_not_met` | raise `max=` or use `rununtil` instead of `stepuntil` |
 | `read_failed` | address may be unmapped: check `regions` |
-| launch failure on system files | expected fallback: use `--aslr` for `%SystemRoot%` binaries |
+
+A `warning` event "fixed base skipped/unavailable" (system files, locked images) is not
+a failure: the launch continues with ASLR and a non-zero slide; pass `--aslr` to silence
+it up front.
 
 When a run hangs, suspect the target hid its threads (`ThreadHideFromDebugger` on a
 session without the hide hooks) or a DLL host idling (`kill` ends it). Re-run with
@@ -111,7 +116,8 @@ aidbg --json -c "file sample.exe" -c run -c detect -c "hide profile vmp" -c "bre
 
 ## Windows (win32) platform notes
 
-- Invoke as `aidbg.exe` (or the full path `D:\crack\debug\code\aidbg\build\aidbg.exe`).
+- Invoke as `aidbg.exe` (on PATH, the repo's `build\aidbg.exe`, or the single-file
+  release download).
 - In PowerShell, `Start-Process -ArgumentList` does **not** quote arguments containing
   spaces - use embedded quotes (`'"two words"'`) or a `--script` file; `-c` lines with
   spaces are best passed via a script file.

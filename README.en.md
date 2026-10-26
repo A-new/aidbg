@@ -66,6 +66,7 @@ Every version is published separately on
 |---|---|
 | [Manual.md](Manual.md) · [Manual.en.md](Manual.en.md) | **AI / script authors**: output contract, expressions, full command reference, workflows |
 | [dev.md](dev.md) · [dev.en.md](dev.en.md) | **Developers**: build, architecture, design decisions, test and release process |
+| [skills/aidbg](skills/aidbg) | **AI agent skill**: copy the `skills/aidbg` folder to `.claude/skills/aidbg` (or your agent's skills directory) so agents like Claude can drive the debugger per this manual |
 
 ### Credits
 
