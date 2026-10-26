@@ -541,7 +541,7 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
     // any self-check the target performs on it) stays byte-identical. For a DLL
     // target the swap must stay active until the loader maps the DLL, so it
     // lives in dll_patch_ and is reverted at the LOAD_DLL event.
-    TransientPePatch patch;
+    exe_patch_ = TransientPePatch{};  // fresh swap state for this launch
     bool pin_base = fixed_base;
     if (pin_base && is_system_path(dll_path.empty() ? wexe : dll_path)) {
         // never rename operating system files aside, not even briefly
@@ -551,7 +551,7 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
         pin_base = false;
     }
     if (pin_base) {
-        TransientPePatch& target_patch = dll_path.empty() ? patch : dll_patch_;
+        TransientPePatch& target_patch = dll_path.empty() ? exe_patch_ : dll_patch_;
         if (!target_patch.clear_dynamic_base(dll_path.empty() ? wexe : dll_path)) {
             // fall back to a normal (relocated) launch instead of failing:
             // the session still works, `modules` shows a non-zero slide
@@ -581,11 +581,11 @@ bool Engine::launch(const std::string& exe, const std::string& args, const std::
     BOOL ok = CreateProcessW(launch_exe.c_str(), cmdline.data(), nullptr, nullptr, FALSE, flags,
                              nullptr, wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
     DWORD create_err = ok ? 0 : GetLastError();
-    if (dll_path.empty()) patch.revert();  // pristine bytes again before the target sees them
-    if (!patch.err.empty()) {
+    if (dll_path.empty()) exe_patch_.revert();  // pristine bytes again before the target sees them
+    if (dll_path.empty() && !exe_patch_.err.empty()) {
         // a failed restore leaves the user's file patched - shout about it
-        Output::instance().event("error", patch.err, Json::obj());
-        std::fprintf(stderr, "[aidbg] %s\n", patch.err.c_str());
+        Output::instance().event("error", exe_patch_.err, Json::obj());
+        std::fprintf(stderr, "[aidbg] %s\n", exe_patch_.err.c_str());
         std::fflush(stderr);
     }
     if (!ok) {
@@ -1045,6 +1045,29 @@ void Engine::process_event(DEBUG_EVENT& ev, bool& stop, DWORD& status) {
     }
 }
 
+// The fixed-base swap renames its patched copy aside right after
+// CreateProcess returns, so a handle-based path query for the running image
+// then reports the staged name ("app.exe.aidbg-patched-<pid>-<tick>").
+// Users, notes and patches must all see the real file instead. The staged
+// name embeds the pid and a tick, so matching on the file name alone cannot
+// hit anything else.
+void Engine::normalize_swap_path(std::string& path) const {
+    auto swapped = [&](const TransientPePatch& p) {
+        return !p.staged.empty() &&
+               to_lower(base_name_of(path)) ==
+                   to_lower(base_name_of(to_utf8(p.staged)));
+    };
+    if (swapped(exe_patch_)) {
+        // launch_exe_path_ is the fully qualified path of what we launched
+        path = launch_exe_path_.empty() ? to_utf8(exe_patch_.target)
+                                        : to_utf8(launch_exe_path_);
+    } else if (swapped(dll_patch_)) {
+        // keep the resolved directory, restore the real file name
+        std::string dir = path.substr(0, path.size() - base_name_of(path).size());
+        path = dir + base_name_of(to_utf8(dll_patch_.target));
+    }
+}
+
 void Engine::on_create_process(DEBUG_EVENT& ev) {
     CREATE_PROCESS_DEBUG_INFO& i = ev.u.CreateProcessInfo;
 
@@ -1066,6 +1089,7 @@ void Engine::on_create_process(DEBUG_EVENT& ev) {
     if (m.path.empty()) m.path = module_name_from_base(p.handle, m.base);
     if (m.path.empty() && !p.is_child && !launch_exe_path_.empty())
         m.path = to_utf8(launch_exe_path_);  // NULL hFile fallback: we know what we launched
+    normalize_swap_path(m.path);
     if (!m.preferred_base) m.preferred_base = pe_image_base_path(to_wide(m.path));
     m.name = base_name_of(m.path);
     p.modules.push_back(m);
@@ -1192,6 +1216,7 @@ void Engine::on_load_dll(DEBUG_EVENT& ev, bool& stop) {
     m.preferred_base = pe_image_base_file(i.hFile);
     m.path = path_from_file_handle(i.hFile);
     if (m.path.empty()) m.path = module_name_from_base(p->handle, base);
+    normalize_swap_path(m.path);
     if (!m.preferred_base) m.preferred_base = pe_image_base_path(to_wide(m.path));
     m.name = base_name_of(m.path);
     p->modules.push_back(m);

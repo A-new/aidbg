@@ -201,11 +201,31 @@ autostep 14                       # 记录接下来 14 条实际执行的指令
 | `setreg <reg> <value>` | 写寄存器；`setreg xmm3 <1..32 hex>` 写完整 128 位 |
 | `mem <addr> [size]` | 十六进制 dump（默认 64 字节，上限 4096） |
 | `read <addr> <size>` / `write <addr> <hexbytes>` | 读字节（≤65536）/ 写字节 |
+| `patch [list \| undo <id\|*> \| clear \| file <out> [orig=<path>] \| <addr> <hexbytes>]` | 补丁管理（见下） |
 | `search <start> <end> <pattern> [max=N]` | 字节搜索（`??` 通配） |
 | `regions [start] [end]` | 内存区域 |
 | `alloc <size>` / `free <addr>` / `protect <addr> <size> <r\|w\|x>` | 内存管理 |
 
 `max=N` 必须显式写成 `max=数字`，以免与十六进制字节混淆。
+
+#### patch：补丁记录与落盘
+
+写入**模块映像内**的字节（`write` 或 `patch <addr> <hexbytes>`，二者等价）会被自动记录：
+先捕获改前字节，按 模块+RVA 锚定（与 notes 相同，跨 ASLR 滑移 / 重启稳定），重叠写入合并为
+一条记录并保留**最初**的原始字节。
+
+- `patch` / `patch list`：列出记录（id、模块、RVA、原始 → 修改后字节）
+- `patch undo <id|*>`：把原始字节写回内存并删除记录（模块须已加载；重启后内存已还原，
+  此时用 `patch clear` 丢弃记录即可）
+- `patch clear`：只丢弃记录，不动内存
+- `patch file <out> [orig=<path>]`：把记录烘焙进磁盘文件副本——按 PE 节表把每个 RVA 映射到
+  文件偏移后写回、重算 CheckSum，输出**可独立运行**的补丁文件（不修改原文件）。默认源为该
+  模块的磁盘路径；模块已卸载时用 `orig=` 指定。记录跨多个模块时须分模块烘焙；RVA 无文件
+  原始映射（纯虚拟数据节）时报错。注意：调试会话若开了 ASLR（slide≠0），新字节中的绝对
+  地址以运行基址为准，落盘前需自行换算（默认固定基址无此问题）。
+
+内存中的补丁也天然包含在 `dump` 导出里（dump 导出的是整个内存镜像），`patch file` 则用于
+"原文件 + 少量字节补丁"的经典破解场景。
 
 ### 3.7 分析
 

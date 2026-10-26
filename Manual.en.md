@@ -219,11 +219,35 @@ it back afterwards).
 | `setreg <reg> <value>` | write a register; `setreg xmm3 <1..32 hex>` writes the full 128 bits |
 | `mem <addr> [size]` | hex dump (default 64 bytes, max 4096) |
 | `read <addr> <size>` / `write <addr> <hexbytes>` | read (<=65536) / write bytes |
+| `patch [list \| undo <id\|*> \| clear \| file <out> [orig=<path>] \| <addr> <hexbytes>]` | patch management (see below) |
 | `search <start> <end> <pattern> [max=N]` | byte search (`??` wildcard) |
 | `regions [start] [end]` | memory regions |
 | `alloc` / `free` / `protect` | memory management |
 
 Write `max=N` explicitly so it cannot be confused with hex bytes.
+
+#### patch: recording and baking byte edits
+
+Every write into **module memory** (`write` or `patch <addr> <hexbytes>` - identical) is
+recorded automatically: the pre-edit bytes are captured first and the edit is anchored to
+module+RVA (like notes, stable across ASLR slides and restarts). Overlapping writes merge
+into one record that keeps the **first** original bytes.
+
+- `patch` / `patch list`: list records (id, module, RVA, original -> patched bytes)
+- `patch undo <id|*>`: write the original bytes back and drop the record (the module must
+  be loaded; after a restart memory is already pristine - `patch clear` just drops records)
+- `patch clear`: drop records without touching memory
+- `patch file <out> [orig=<path>]`: bake the records into a copy of the on-disk file - each
+  RVA is mapped to a file offset through the PE section table, the CheckSum is recomputed
+  and a **standalone runnable** patched file is written (the original is never modified).
+  The source defaults to the module's path on disk; pass `orig=` when it is not loaded.
+  Records spanning several modules must be baked per module; an RVA without a raw file
+  mapping (virtual-only data) is an error. Caveat: when the session runs with ASLR
+  (slide != 0), absolute addresses inside the new bytes refer to the runtime base and need
+  converting before baking (a non-issue with the default fixed base).
+
+In-memory patches are naturally included in a `dump` (it exports the whole memory image);
+`patch file` covers the classic "original file + a few byte patches" crack workflow.
 
 ### 3.7 Analysis
 

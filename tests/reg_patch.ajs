@@ -1,0 +1,21 @@
+# patch: record / list / undo / merge / bake into a file copy
+run
+# baseline bytes at the entry point
+mem $entry+1 4
+# record one edit (bare patch form)
+patch $entry+1 EB 03
+mem $entry+1 4
+# the same edit via write lands in the same record (overlap merge)
+write $entry+1 EB 04
+patch list
+# undo restores the very first original bytes
+patch undo 1
+mem $entry+1 4
+# record again and bake into a copy of the binary
+patch $entry+1 EB 03
+patch $entry+2 90
+patch list
+patch file tests/out_patch.exe
+# records survive a restart (memory reverts, the record does not)
+kill
+patch list

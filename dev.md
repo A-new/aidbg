@@ -52,6 +52,7 @@ src/
     breakpoints.cpp    软/硬/内存断点 + 条件 + 命中命令
     hide.cpp           反反调试：L1 补丁 + L2 API 虚拟化 + detect
     notes.cpp          用户标签/注释（模块+RVA 锚定）
+    patch.cpp          补丁记录（write 落到模块内存自动记录）+ 落盘（RVA→文件偏移、重算 CheckSum）
     memory.cpp registers.cpp symbols.cpp expr.cpp types.cpp
     exceptions.cpp disasm.cpp cfg.cpp
     ntview.cpp         TEB/PEB/堆/句柄视图
@@ -197,7 +198,8 @@ Streamable HTTP（`POST /mcp`，HTTP 响应即 JSON-RPC 响应）。Engine 非�
 - **反检测探针**：`antidbg_probe(.32).exe` 跑 al-khaser 式 15 项检查；`selfcheck(.32).exe`
   运行时哈希自身文件（固定基址自校验）。
 - **回归脚本**（`*.ajs`，`--script` 驱动）：`hide_std`（hide 矩阵）、`reg_basic`、
-  `reg_children`、`reg_types`、`fixbase`、`dlltest` 等。判定标准：目标输出文件内容 +
+  `reg_children`、`reg_types`、`reg_patch`（补丁记录/合并/撤销/落盘）、`fixbase`、
+  `dlltest` 等。判定标准：目标输出文件内容 +
   JSON 日志无意外 `"ok":false` + 进程正常退出。
 - **交互式回归**（python 驱动，需动态取 pid/基址的场景）：
   `tests/ws_test.py`（多进程 world-stop + 按进程符号，依赖 `tests/tickpair.exe`）、

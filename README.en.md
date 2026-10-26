@@ -48,6 +48,7 @@ aidbg --json ^
 | | |
 |---|---|
 | **Debugging** | software/hardware/memory breakpoints, conditions, on-hit commands, module-load breaks, continue/pause/step/over/out/until |
+| **Patching** | writes to module memory are recorded (original bytes kept), `undo` rolls back, `patch file` bakes them into a standalone runnable copy |
 | **Analysis** | disassembly with symbol annotations, control flow graphs, call stacks with source lines, TEB/PEB/heap/handle views, PDB types |
 | **Unpacking** | IAT scan / xref / rebuild-fix, import call tracing, dump the in-memory image as a runnable PE |
 | **Anti-anti-debug** | `hide` profiles (compatible with `scylla_hide.ini`) + `detect` self-check (al-khaser catalogue) |

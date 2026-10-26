@@ -48,6 +48,7 @@ mixed x86/x64), so reads while paused are consistent process-wide.
 | `regs [name...]` | GPRs + flags + mxcsr + xmm0-15 (x86: 0-7) |
 | `setreg <reg> <val>` | `setreg xmm3 <1..32 hex>` for full 128-bit |
 | `mem <addr> [size]` / `read` / `write <addr> <hexbytes>` | dump (<=4096) / read (<=65536) / write |
+| `patch [list\|undo <id\|*>\|clear\|file <out> [orig=<path>]\|<addr> <hexbytes>]` | writes into module memory are recorded (original bytes kept); `undo` restores, `file` bakes them into a runnable patched copy of the binary |
 | `search <s> <e> <pat> [max=N]` | `??` wildcard; `max=N` explicit |
 | `regions [s] [e]`, `alloc`, `free`, `protect` | memory management |
 

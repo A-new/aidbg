@@ -11,6 +11,7 @@
 #include "engine/hide.h"
 #include "engine/memory.h"
 #include "engine/notes.h"
+#include "engine/patch.h"
 #include "engine/registers.h"
 #include "engine/snapshot.h"
 #include "engine/symbols.h"
@@ -222,6 +223,8 @@ public:
     Hider hide;
     // user labels / comments anchored to module+RVA
     Notes notes;
+    // recorded byte edits in module memory (patch tracking)
+    PatchMgr patches;
 
     // Typed evaluation of `base(.field|->field|[index])*`, e.g.
     // `list.head->value`. Falls back to plain evaluation when no type matches.
@@ -264,6 +267,10 @@ private:
     bool set_trap_flag(bool enable, std::string& err);
 
     void on_create_process(DEBUG_EVENT& ev);
+    // maps a fixed-base swap's staged file name ("app.exe.aidbg-patched-...")
+    // back to the path the user launched; module lists, notes and patches
+    // must all see the real file
+    void normalize_swap_path(std::string& path) const;
     void on_exit_process(DEBUG_EVENT& ev);
     void on_load_dll(DEBUG_EVENT& ev, bool& stop);
     void on_unload_dll(DEBUG_EVENT& ev);
@@ -334,6 +341,10 @@ private:
     // DLL target support: extracted host stub and the still-active base swap
     std::wstring dll_host_stub_;
     TransientPePatch dll_patch_;
+    // base swap of the exe launch; reverted right after CreateProcess but
+    // kept around so the staged file name can be mapped back (see
+    // normalize_swap_path)
+    TransientPePatch exe_patch_;
 
     DEBUG_EVENT pending_{};
     bool has_pending_ = false;

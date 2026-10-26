@@ -11,6 +11,7 @@
 #include "util/version.h"
 #include "engine/importfix.h"
 #include "engine/ntview.h"
+#include "engine/patch.h"
 #include "engine/pedump.h"
 #include "util/strutil.h"
 
@@ -624,9 +625,12 @@ CmdResult cmd_read(Engine& e, CliConfig&, const std::vector<std::string>& a) {
     return ok(d, bytes_to_hex(buf.data(), got) + "\n");
 }
 
-CmdResult cmd_write(Engine& e, CliConfig&, const std::vector<std::string>& a) {
-    if (!need_args(a, 2, "write <addr> <hexbytes>"))
-        return fail("bad_args", "write <addr> <hexbytes>");
+// shared by `write` and the bare `patch <addr> <hexbytes>` form: writes the
+// bytes and records the edit when the address falls inside a loaded module,
+// capturing the pre-edit bytes first (that is what `patch undo` restores)
+static CmdResult do_write(Engine& e, const std::vector<std::string>& a,
+                          const char* usage) {
+    if (!need_args(a, 2, usage)) return fail("bad_args", usage);
     uint64_t addr = 0;
     CmdResult dummy;
     if (!resolve(e, a[0], addr, dummy)) return dummy;
@@ -636,13 +640,194 @@ CmdResult cmd_write(Engine& e, CliConfig&, const std::vector<std::string>& a) {
         return fail("bad_args", "invalid byte pattern");
     for (bool m : mask)
         if (!m) return fail("bad_args", "wildcards are not allowed when writing");
+    if (!e.active()) return fail("no_target", "no active target - use 'run' or 'attach'");
+    if (!e.is_paused()) return fail("not_paused", "target is not paused");
+
+    const ModuleInfo* mod = e.module_at(addr);
+    std::vector<uint8_t> original(bytes.size());
+    bool have_original = false;
+    std::string note;
+    if (mod) {
+        std::string rerr;
+        have_original = read_memory_exact(e.process(), addr, original.data(), original.size(),
+                                          rerr);
+        // an unreadable range cannot be recorded, but the write itself may
+        // still be legitimate - the response says so instead of failing
+        if (!have_original)
+            note = "patch not recorded: pre-edit bytes unreadable (" + rerr + ")";
+    }
+
     std::string err;
     if (!write_memory(e.process(), addr, bytes.data(), bytes.size(), err))
         return fail("write_failed", err);
+
+    int patch_id = 0;
+    if (mod && have_original)
+        patch_id = e.patches.record(mod->name, addr - mod->base, original, bytes);
     Json d = Json::obj();
     d.set_hex("address", addr);
     d.set_u("written", bytes.size());
-    return ok(d, fmt("wrote %zu bytes at %s\n", bytes.size(), hex8(addr).c_str()));
+    if (mod) d.set_str("module", mod->name);
+    if (patch_id) d.set_u("patch_id", patch_id);
+    if (!note.empty()) d.set_str("note", note);
+    std::string t;
+    if (patch_id)
+        t = fmt("wrote %zu bytes at %s (patch %d in %s)\n", bytes.size(),
+                hex8(addr).c_str(), patch_id, mod->name.c_str());
+    else
+        t = fmt("wrote %zu bytes at %s%s%s\n", bytes.size(), hex8(addr).c_str(),
+                note.empty() ? "" : " [", note.empty() ? "" : note.c_str(),
+                note.empty() ? "" : "]");
+    return ok(d, t);
+}
+
+CmdResult cmd_write(Engine& e, CliConfig&, const std::vector<std::string>& a) {
+    return do_write(e, a, "write <addr> <hexbytes>");
+}
+
+// ------------------------------------------------------------- patch manager
+
+// module record by file name in the current process (case-insensitive, like
+// everywhere else module names are matched)
+static const ModuleInfo* module_by_name(Engine& e, const std::string& name) {
+    for (auto& m : e.modules())
+        if (to_lower(m.name) == to_lower(name)) return &m;
+    return nullptr;
+}
+
+static CmdResult patch_list(Engine& e) {
+    auto all = e.patches.all();
+    Json arr = Json::arr();
+    std::string t = fmt("%-4s %-18s %-10s %-5s %s\n", "id", "module", "rva", "size",
+                        "original -> patched");
+    t += std::string(78, '-') + "\n";
+    for (auto& p : all) {
+        Json j = Json::obj();
+        j.set_u("id", p.id);
+        j.set_str("module", p.module);
+        j.set_hex("rva", p.rva);
+        j.set_str("original", bytes_to_hex(p.original));
+        j.set_str("patched", bytes_to_hex(p.patched));
+        arr.push(std::move(j));
+        t += fmt("%-4d %-18s %-10s %-5llu %s -> %s\n", p.id, p.module.c_str(),
+                 hex8(p.rva).c_str(), (unsigned long long)p.original.size(),
+                 bytes_to_hex(p.original).c_str(), bytes_to_hex(p.patched).c_str());
+    }
+    if (all.empty()) t += "(no patches recorded)\n";
+    Json d = Json::obj();
+    d.set("patches", std::move(arr));
+    d.set_u("count", all.size());
+    return ok(d, t);
+}
+
+static CmdResult patch_undo(Engine& e, const std::vector<std::string>& a) {
+    if (a.size() < 2) return fail("bad_args", "patch undo <id|*>");
+    if (!e.active()) return fail("no_target", "no active target - use 'run' or 'attach'");
+    if (!e.is_paused()) return fail("not_paused", "target is not paused");
+
+    // work on copies: removing a record must not dangle what is left to do
+    std::vector<PatchRecord> targets;
+    if (a[1] == "*") {
+        targets = e.patches.all();
+        if (targets.empty()) return fail("no_patches", "no patches recorded");
+    } else {
+        uint64_t id = 0;
+        if (!parse_u64(a[1], id)) return fail("bad_args", "invalid patch id");
+        const PatchRecord* p = e.patches.find((int)id);
+        if (!p) return fail("unknown_patch", "no patch with id " + a[1]);
+        targets.push_back(*p);
+    }
+
+    // validate every module up front so a restore never ends half-done
+    for (auto& p : targets) {
+        if (!module_by_name(e, p.module))
+            return fail("module_not_loaded",
+                        p.module + " is not loaded; restore is impossible after a restart");
+    }
+
+    Json arr = Json::arr();
+    std::string t;
+    for (auto& p : targets) {
+        const ModuleInfo* m = module_by_name(e, p.module);
+        uint64_t addr = m->base + p.rva;
+        std::string err;
+        if (!write_memory(e.process(), addr, p.original.data(), p.original.size(), err))
+            return fail("write_failed", err);
+        e.patches.remove(p.id);
+        Json j = Json::obj();
+        j.set_u("id", p.id);
+        j.set_str("module", p.module);
+        j.set_hex("address", addr);
+        j.set_u("restored", p.original.size());
+        arr.push(std::move(j));
+        t += fmt("patch %d restored: %llu byte(s) at %s\n", p.id,
+                 (unsigned long long)p.original.size(), hex8(addr).c_str());
+    }
+    Json d = Json::obj();
+    d.set("restored", std::move(arr));
+    return ok(d, t);
+}
+
+static CmdResult patch_file_cmd(Engine& e, const std::vector<std::string>& a) {
+    if (a.size() < 2) return fail("bad_args", "patch file <out> [orig=<path>]");
+    if (e.patches.count() == 0) return fail("no_patches", "no patches recorded");
+
+    // one module at a time: the output is a copy of a single input file
+    std::vector<const PatchRecord*> recs;
+    std::string perr;
+    if (!e.patches.by_module("", recs, perr)) return fail("bad_args", perr);
+
+    std::string out = a[1];
+    std::string orig_arg;
+    for (size_t i = 2; i < a.size(); i++)
+        if (a[i].rfind("orig=", 0) == 0) orig_arg = a[i].substr(5);
+
+    const std::string& module = recs.front()->module;
+    std::string src = orig_arg;
+    if (src.empty()) {
+        const ModuleInfo* m = module_by_name(e, module);
+        if (m) {
+            src = m->path;
+        } else {
+            return fail("bad_args", module + " is not loaded; pass orig=<path> to name the "
+                                        "source file");
+        }
+    }
+
+    std::vector<std::pair<uint64_t, std::vector<uint8_t>>> edits;
+    size_t nbytes = 0;
+    for (auto* p : recs) {
+        edits.push_back({p->rva, p->patched});
+        nbytes += p->patched.size();
+    }
+
+    Json report;
+    std::string err;
+    if (!patch_file(src, out, edits, report, err))
+        return fail("patch_file_failed", err);
+    report.set_u("patches", recs.size());
+    report.set_u("bytes", nbytes);
+    std::string t = fmt("patched copy written: %s\n  source: %s\n  patches applied: %zu "
+                        "(%zu byte(s))\n",
+                        out.c_str(), src.c_str(), recs.size(), nbytes);
+    t += fmt("  checksum: 0x%08llx\n",
+             (unsigned long long)report.get("checksum").as_u());
+    return ok(report, t);
+}
+
+CmdResult cmd_patch(Engine& e, CliConfig&, const std::vector<std::string>& a) {
+    std::string sub = a.empty() ? "list" : to_lower(a[0]);
+    if (sub == "list") return patch_list(e);
+    if (sub == "undo") return patch_undo(e, a);
+    if (sub == "clear") {
+        size_t n = e.patches.count();
+        e.patches.clear();
+        Json d = Json::obj();
+        d.set_u("dropped", n);
+        return ok(d, fmt("%zu patch record(s) dropped (memory untouched)\n", n));
+    }
+    if (sub == "file") return patch_file_cmd(e, a);
+    return do_write(e, a, "patch <addr> <hexbytes> | patch list|undo|clear|file");
 }
 
 CmdResult cmd_search(Engine& e, CliConfig&, const std::vector<std::string>& a) {
@@ -2673,6 +2858,7 @@ const CmdSpec kCmds[] = {
     {"alloc", "", "alloc <size>", "allocate memory in the target", true, true, cmd_alloc},
     {"free", "", "free <addr>", "free allocated memory", true, true, cmd_free},
     {"protect", "", "protect <addr> <size> <r|w|x>", "change page protection", true, true, cmd_protect},
+    {"patch", "", "patch [list | undo <id|*> | clear | file <out> [orig=<path>] | <addr> <hexbytes>]", "tracked byte patches: writes into module memory are recorded (original bytes saved), undo restores them, file bakes them into a patched copy of the binary", false, false, cmd_patch},
 
     {"disasm", "u,dis", "disasm [addr] [count]", "disassemble instructions", true, true, cmd_disasm},
     {"flow", "cfg,cfgv", "flow [addr] [max_blocks]", "control-flow graph of the containing function (basic blocks and edges)", true, true, cmd_flow},

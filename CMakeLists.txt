@@ -79,6 +79,7 @@ set(AIDBG_SOURCES
   src/engine/ntview.cpp
   src/engine/hide.cpp
   src/engine/notes.cpp
+  src/engine/patch.cpp
   src/engine/pedump.cpp
   src/engine/memory.cpp
   src/engine/registers.cpp

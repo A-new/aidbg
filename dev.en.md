@@ -55,6 +55,7 @@ src/
     breakpoints.cpp    software/hardware/memory breakpoints + conditions + on-hit commands
     hide.cpp           anti-anti-debug: L1 patches + L2 API virtualization + detect
     notes.cpp          user labels/comments (module+RVA anchored)
+    patch.cpp          patch records (writes into module memory auto-recorded) + baking into a file (RVA->file offset, CheckSum recomputed)
     memory/registers/symbols/expr/types/exceptions/disasm/cfg
     ntview.cpp         TEB/PEB/heap/handle views
     snapshot.cpp snapstore.cpp   in-memory snapshot ring + single-file store
@@ -201,7 +202,8 @@ export ends the stub with exit code 3 (no silent idling).
 - **Probes**: `antidbg_probe(.32).exe` runs 15 al-khaser-style checks;
   `selfcheck(.32).exe` hashes its own file at runtime (fixed-base verification).
 - **Regression scripts** (`*.ajs`, driven by `--script`): `hide_std`, `reg_basic`,
-  `reg_children`, `reg_types`, `fixbase`, `dlltest`, ... Pass criteria: the target's output
+  `reg_children`, `reg_types`, `reg_patch` (patch record/merge/undo/file), `fixbase`,
+  `dlltest`, ... Pass criteria: the target's output
   file contents + no unexpected `"ok":false` in the JSON log + clean process exit.
 - Every bug fix ships with a reproducing script. Beware: `Start-Process` does not quote
   arguments containing spaces (use embedded quotes or a script file in tests).

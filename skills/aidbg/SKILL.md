@@ -3,7 +3,8 @@ name: aidbg
 description: |
   Drive the aidbg Windows debugger (JSONL CLI / MCP) to debug and reverse-engineer
   Windows x86/x64 executables and DLLs. Use when the user asks to debug, trace,
-  break, unpack (IAT fix/dump), inspect memory/registers/PEB-TEB, bypass
+  break, unpack (IAT fix/dump), patch bytes into a runnable copy (record/undo/bake),
+  inspect memory/registers/PEB-TEB, bypass
   anti-debugging (hide/detect), or analyze a Windows binary with a debugger -
   including "why does this exe behave this way" style questions that need a live
   run. Not for explaining debugging theory, using other debuggers (x64dbg, IDA,
@@ -67,7 +68,13 @@ to remote-control a debugger on another machine). Full command reference:
 6. **Persist conclusions** with `label`/`comment` + `notes save file.json` so a later
    session can reload them (`notes load`).
 
-7. **Hardened targets**: run `detect`; if checks fire, `hide profile vmp|themida|obsidium`
+7. **Patching a binary**: edit bytes with `patch <addr> <hexbytes>` (identical to `write`,
+   but writes into module memory are recorded with the original bytes kept, anchored
+   module+RVA), test the change live, then `patch file out.exe` bakes the records into a
+   standalone runnable copy of the binary (`patch list`/`patch undo <id|*>` manage them).
+   Use `dump` instead when the goal is exporting the whole unpacked memory image.
+
+8. **Hardened targets**: run `detect`; if checks fire, `hide profile vmp|themida|obsidium`
    (or `hide set <key> 1`) and re-run `detect`. Report honestly what is not covered
    (direct syscalls, timing checks, ntdll integrity scans see the INT3 hooks).
 
@@ -112,6 +119,12 @@ Check and hide anti-debugging, then inspect an API call:
 
 ```
 aidbg --json -c "file sample.exe" -c run -c detect -c "hide profile vmp" -c "break CreateFileW" -c "continue" -c "regs rcx rdx r8 r9" -c "read rdx 64"
+```
+
+Patch a conditional jump into an unconditional one and bake it into a file:
+
+```
+aidbg --json -c "file sample.exe" -c run -c "disasm 12" -c "patch 0x140001A3B EB" -c "patch list" -c "patch file patched.exe" -c kill
 ```
 
 ## Windows (win32) platform notes
