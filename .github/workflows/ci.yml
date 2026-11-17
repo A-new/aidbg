@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # build.bat locates a recent MSVC on its own (VS 18/2022/2019). VC-LTL is
+      # absent on the runner, so CMake falls back to a pure static CRT - the
+      # resulting exe still has no VC runtime dependency.
+      - name: Build (Release)
+        shell: cmd
+        run: build.bat Release
+
+      - name: Version
+        shell: cmd
+        run: build\aidbg.exe --version
+
+      # A tag must ship the binary whose reported version it names. This guards
+      # the manual release flow (bump version.h, rebuild, tag) against a stale
+      # build being published.
+      - name: Tag matches AIDBG_VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(./build/aidbg.exe --version | awk '{print $2}')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::binary reports $version but the tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Regression (.ajs)
+        shell: cmd
+        run: python -I tests\run_regression.py
+
+      - name: Regression (end-to-end)
+        shell: cmd
+        run: python -I tests\run_regression.py --e2e
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: aidbg-${{ github.sha }}
+          path: build/aidbg.exe
+          if-no-files-found: error
+          retention-days: 14

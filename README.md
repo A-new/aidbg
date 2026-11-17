@@ -3,6 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/A-new/aidbg/releases"><img alt="release" src="https://img.shields.io/github/v/release/A-new/aidbg?style=flat-square" /></a>
+  <a href="https://github.com/A-new/aidbg/actions/workflows/ci.yml"><img alt="ci" src="https://github.com/A-new/aidbg/actions/workflows/ci.yml/badge.svg" /></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20x86%20%7C%20x64-blue?style=flat-square" />
   <img alt="runtime" src="https://img.shields.io/badge/runtime-zero%20VC%20redist-brightgreen?style=flat-square" />
 </p>

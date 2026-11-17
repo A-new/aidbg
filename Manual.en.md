@@ -99,7 +99,8 @@ Everything that takes an address accepts an expression:
 | compare/logic | `rcx == 14`, `rax && [rsp] > 0x1000` | `== != < <= > >= && \|\|` |
 
 Comparisons return `1`/`0` for **conditional breakpoints**. Plain arithmetic like `eval 2+2`
-works too.
+works too and needs **no live session** (constants can be evaluated before `run`/`attach`);
+expressions touching registers, symbols or memory still require a target.
 
 ---
 

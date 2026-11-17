@@ -2549,7 +2549,12 @@ bool Engine::eval(const std::string& text, uint64_t& out, std::string& err) {
             // general evaluator handles it
         }
     }
-    return eval_expr(t, eval_context(), out, err);
+    if (eval_expr(t, eval_context(), out, err)) return true;
+    // Constants work without a session; make it obvious why a register or
+    // symbol expression failed instead of implying a typo.
+    if (!active()) err = fmt("no active target (only constant expressions are available): %s",
+                             err.c_str());
+    return false;
 }
 
 // ---------------------------------------------------------------- callstack

@@ -200,6 +200,10 @@ Streamable HTTP（`POST /mcp`，HTTP 响应即 JSON-RPC 响应）。Engine 非�
 `REGRESSIONS` / `IGNORED` 表里登记**，未登记或不存在的脚本直接判失败，避免新增
 脚本悄悄不跑。
 
+**CI**（`.github/workflows/ci.yml`）：`windows-latest` 上执行 `build.bat Release`、
+`.ajs` 回归、`--e2e` 全量回归，并上传 `build/aidbg.exe` 产物；推送 tag 时额外校验
+**二进制 `--version` 与 tag 一致**，防止把过期构建发进 Release。
+
 - **测试目标**（`tests/`，均带 PDB）：`target.exe`（x64）、`target32.exe`、`spawner.exe`
   （子进程）、`types_test.exe`、`imports_test.exe`、`sample_dll(.32).dll`。
 - **反检测探针**：`antidbg_probe(.32).exe` 跑 al-khaser 式 15 项检查；`selfcheck(.32).exe`

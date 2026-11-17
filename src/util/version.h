@@ -4,6 +4,10 @@
 //
 // Bump it on every published update; each released build gets its own GitHub
 // release (tag v<major.minor.patch>) instead of reusing an old one.
+//   0.4.2  eval no longer requires a live session for constant expressions
+//          (registers/symbols/memory still do, with an explicit error), and
+//          CI: Windows build + both regression suites, a tag/version
+//          consistency check and an artifact upload.
 //   0.4.1  debug-string output fixed: OutputDebugString reaches a debugger as
 //          a first-chance DBG_PRINTEXCEPTION_C/_WIDE_C exception, and the old
 //          "pass" policy answered DBG_CONTINUE, so Windows never used the
@@ -40,4 +44,4 @@
 //          fixed-base crash recovery, user-bp priority over hide hooks, misc
 //   0.2.0  fixed-base rename-swap launch, notes/labels, bpcmd, bpload, XMM
 //   0.1.0  initial release
-#define AIDBG_VERSION "0.4.1"
+#define AIDBG_VERSION "0.4.2"

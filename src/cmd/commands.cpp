@@ -2873,7 +2873,11 @@ const CmdSpec kCmds[] = {
     {"heap", "", "heap [max_blocks]", "enumerate the target's heaps and their blocks", true, false, cmd_heap},
     {"handles", "", "handles [type] [max]", "enumerate the target's open handles", true, false, cmd_handles},
     {"symbols", "syms", "symbols [mask] [max]", "enumerate symbols", true, false, cmd_symbols},
-    {"eval", "?", "eval <expression>", "evaluate an expression", true, false, cmd_eval},
+    // Pure arithmetic must not require a session: an agent that has not
+    // attached yet should still be able to evaluate constants. Expressions
+    // that need target state (registers, symbols, memory) fail with a clear
+    // error instead of the generic no_target gate.
+    {"eval", "?", "eval <expression>", "evaluate an expression", false, false, cmd_eval},
     {"exports", "", "exports [module] [mask] [max]", "list a module's exports, parsed from the target's memory", true, true, cmd_exports},
     {"imports", "", "imports <addr> [count]", "resolve a run of pointers to module!function (IAT analysis)", true, true, cmd_imports},
     {"iat", "", "iat [scan [start end] | map <addr> [count] | refs <start> <end> | fix <start> <end> [newva] | trace <addr> [max_steps]]", "find, analyse and rebuild import tables", true, true, cmd_iat},

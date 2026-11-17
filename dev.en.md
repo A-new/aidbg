@@ -205,6 +205,11 @@ python end-to-end tests, `--list` prints the classification, `--only <substr>` f
 tables; an unclassified or missing script fails the run, so a new test can never be
 silently skipped.
 
+**CI** (`.github/workflows/ci.yml`): on `windows-latest` it builds with `build.bat Release`,
+runs the `.ajs` suite and the `--e2e` suite, and uploads `build/aidbg.exe`. On a tag push it
+additionally checks that the binary's `--version` matches the tag, so a stale build cannot
+be published.
+
 - **Targets** (`tests/`, all with PDBs): `target.exe` (x64), `target32.exe`, `spawner.exe`
   (children), `types_test.exe`, `imports_test.exe`, `sample_dll(.32).dll`.
 - **Probes**: `antidbg_probe(.32).exe` runs 15 al-khaser-style checks;
