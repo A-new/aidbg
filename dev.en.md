@@ -197,14 +197,29 @@ export ends the stub with exit code 3 (no silent idling).
 
 ## 5. Testing
 
+**One-shot regression**: `python -I tests/run_regression.py`. It checks every script's
+timeout (90s default - a hung script fails), exit code, that each stdout line is valid
+UTF-8 JSON (the JSONL contract), and that no line carries `"ok":false`. `--e2e` adds the
+python end-to-end tests, `--list` prints the classification, `--only <substr>` filters.
+**Every `tests/*.ajs` must be registered** in the runner's `REGRESSIONS` / `IGNORED`
+tables; an unclassified or missing script fails the run, so a new test can never be
+silently skipped.
+
 - **Targets** (`tests/`, all with PDBs): `target.exe` (x64), `target32.exe`, `spawner.exe`
   (children), `types_test.exe`, `imports_test.exe`, `sample_dll(.32).dll`.
 - **Probes**: `antidbg_probe(.32).exe` runs 15 al-khaser-style checks;
   `selfcheck(.32).exe` hashes its own file at runtime (fixed-base verification).
 - **Regression scripts** (`*.ajs`, driven by `--script`): `hide_std`, `reg_basic`,
-  `reg_children`, `reg_types`, `reg_patch` (patch record/merge/undo/file), `fixbase`,
-  `dlltest`, ... Pass criteria: the target's output
-  file contents + no unexpected `"ok":false` in the JSON log + clean process exit.
+  `reg_children` (x64 parent + x86 child, per-process symbols, mixed-arch registers),
+  `reg_types`, `reg_patch` (patch record/merge/undo/file), `fixbase`, `dlltest`, ...
+  The scripts do not `file` the target themselves; most need `--exe` as well
+  (`tests/target.exe`, or `tests/spawner.exe` for `reg_children`). Pass criteria: the
+  target's output file contents + no unexpected `"ok":false` in the JSON log + clean
+  process exit.
+- **Interactive regressions** (python, for cases needing live pids/bases):
+  `ws_test.py`, `http_mcp_test.py`, `reloc_test.py`, `iat_reloc_test.py`, and
+  `dbgstring_test.py` (debug-string UTF-8 contract + system-process filtering, driven by
+  `dbgstring.exe` built from `dbgstring.c`).
 - Every bug fix ships with a reproducing script. Beware: `Start-Process` does not quote
   arguments containing spaces (use embedded quotes or a script file in tests).
 - **Session/MCP regression checks** (for this round of fixes):
@@ -271,6 +286,21 @@ export ends the stub with exit code 3 (no silent idling).
 - `conhost.exe` inherits the `DEBUG_PROCESS` debug port. Not separating system processes lets
   it steal `current`, makes hide plant INT3s into it, and lets shared system-DLL addresses
   mis-attribute breakpoints.
+- **`OutputDebugString` is delivered as a first-chance exception**
+  (`DBG_PRINTEXCEPTION_C` 0x40010006 / `_WIDE_C` 0x4001000A). The old default `Pass` policy
+  answered `DBG_CONTINUE`, so Windows considered it handled and never used the DBWIN
+  fallback: the target's debug output was silently lost, while system processes (answered
+  `kNotHandled`) leaked as `debug_string` noise. It is now decoded in `on_exception`
+  (`[0]`=length, `[1]`=pointer; WIDE is UTF-16LE), ANSI is converted ACP->UTF-8 and only
+  valid UTF-8 is emitted (UTF-8-emitting targets pass through unchanged); system-process
+  output is dropped.
+- **hide and debug strings are mutually exclusive**: kernel32 only raises that exception
+  while `PEB.BeingDebugged` is set, so once hide clears it the target's `OutputDebugString`
+  produces no event at all. Use `--hide off` when debug output is needed.
+- **The DLL host idles forever when no export is given** (the `Sleep` loop at the end of
+  `dllhost.c` - by design, it keeps the DLL mapped for manual analysis). An `.ajs` script
+  must therefore never issue an unbounded `continue` after DllMain: it would block forever.
+  `dlltest*.ajs` now pass an export to `run` so the symbol breakpoint is actually hit.
 
 ---
 

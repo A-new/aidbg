@@ -4,6 +4,14 @@
 //
 // Bump it on every published update; each released build gets its own GitHub
 // release (tag v<major.minor.patch>) instead of reusing an old one.
+//   0.4.1  debug-string output fixed: OutputDebugString reaches a debugger as
+//          a first-chance DBG_PRINTEXCEPTION_C/_WIDE_C exception, and the old
+//          "pass" policy answered DBG_CONTINUE, so Windows never used the
+//          DBWIN fallback and the target's own debug output was lost. The
+//          engine now decodes it (ANSI and UTF-16 both normalised to valid
+//          UTF-8) and drops system-process diagnostics such as conhost's.
+//          Also: unified regression runner, fixed stale regression scripts,
+//          MIT license.
 //   0.4.0  patch command: writes to module memory are recorded (original
 //          bytes captured, anchored module+RVA, overlapping writes merged),
 //          undo restores them, patch file bakes the records into a runnable
@@ -32,4 +40,4 @@
 //          fixed-base crash recovery, user-bp priority over hide hooks, misc
 //   0.2.0  fixed-base rename-swap launch, notes/labels, bpcmd, bpload, XMM
 //   0.1.0  initial release
-#define AIDBG_VERSION "0.4.0"
+#define AIDBG_VERSION "0.4.1"

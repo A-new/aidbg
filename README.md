@@ -73,6 +73,10 @@ aidbg --json ^
 工具链：[Zydis](https://github.com/zyantific/zydis)（MIT）。设计参考了 x64dbg、raddebugger、
 GDB、Z0BDbgCli、Nanomite、Syser、ScyllaHide、al-khaser 等开源项目，在此一并致谢。
 
+### 许可证
+
+[MIT](LICENSE) © A-new。第三方组件遵循其各自的许可证（Zydis 为 MIT）。
+
 ---
 
 **反馈与问题** [Issues](https://github.com/A-new/aidbg/issues) | [Releases](https://github.com/A-new/aidbg/releases)

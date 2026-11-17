@@ -49,6 +49,11 @@ With `--json`, **each command produces exactly one line** of JSON:
 
 Async events (debug strings, warnings) get their own line:
 `{"kind":"event","event":"debug_string","text":"..."}`.
+`text` is always valid UTF-8 (ANSI and UTF-16 debug strings are both converted),
+and diagnostics from system helpers such as conhost.exe never reach the session.
+Note that `hide` clears `PEB.BeingDebugged`, and kernel32 only delivers debug
+strings while a debugger is visible - so with hide on the target's own
+`OutputDebugString` is invisible; use `--hide off` when you need it.
 
 ### 1.2 Value encoding
 

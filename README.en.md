@@ -74,6 +74,10 @@ Every version is published separately on
 Toolchain: [Zydis](https://github.com/zyantific/zydis) (MIT). The design draws on x64dbg,
 raddebugger, GDB, Z0BDbgCli, Nanomite, Syser, ScyllaHide and al-khaser - thanks to all of them.
 
+### License
+
+[MIT](LICENSE) © A-new. Third-party components keep their own licenses (Zydis is MIT).
+
 ---
 
 **Feedback** [Issues](https://github.com/A-new/aidbg/issues) | [Releases](https://github.com/A-new/aidbg/releases)

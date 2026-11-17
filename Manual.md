@@ -46,6 +46,10 @@
   `system_break` / `module_load` / `exit` / `timeout`
 
 异步事件（调试字符串、告警等）单独成行：`{"kind":"event","event":"debug_string","text":"..."}`。
+`text` 始终是合法 UTF-8（ANSI / UTF-16 调试字符串都会转换）；来自 conhost 等系统
+辅助进程的诊断不会出现在会话里。注意 `hide` 会清零 `PEB.BeingDebugged`，而
+kernel32 只在存在调试器时投递调试字符串——因此开启 hide 时目标自身的
+`OutputDebugString` 不可见，需要它时用 `--hide off`。
 
 ### 1.2 数值编码
 

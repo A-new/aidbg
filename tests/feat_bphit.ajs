@@ -1,8 +1,13 @@
+# Breakpoint feature check. The evals must come after `run`: address and
+# register expressions need a live target (constant parsing is still exercised,
+# but through the same path once the session exists).
+run
 eval 2+2
 eval 10*3+5
-run
 eval rip+4
 break accumulate
 bpcmd 2 eval 2+2
 continue
-continue
+bpcmd
+bl
+kill

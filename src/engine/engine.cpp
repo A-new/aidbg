@@ -53,6 +53,71 @@ std::string base_name_of(const std::string& path) {
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+// The JSON contract promises UTF-8, but OutputDebugStringA hands over bytes in
+// the process's ANSI code page. Strict clients reject a line carrying invalid
+// UTF-8, so every debug string is normalised before it reaches the envelope.
+bool is_valid_utf8(const std::string& s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = (unsigned char)s[i];
+        size_t continuation;
+        if (c < 0x80) {
+            ++i;
+            continue;
+        } else if (c >= 0xC2 && c <= 0xDF) {
+            continuation = 1;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            continuation = 2;
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            continuation = 3;
+        } else {
+            return false;
+        }
+        if (i + continuation >= s.size()) return false;
+        for (size_t k = 1; k <= continuation; ++k)
+            if (((unsigned char)s[i + k] & 0xC0) != 0x80) return false;
+        // reject overlong forms and UTF-16 surrogates: they would still be
+        // rejected by a strict JSON parser
+        unsigned char c1 = (unsigned char)s[i + 1];
+        if (continuation == 2 && ((c == 0xE0 && c1 < 0xA0) || (c == 0xED && c1 > 0x9F)))
+            return false;
+        if (continuation == 3 && ((c == 0xF0 && c1 < 0x90) || (c == 0xF4 && c1 > 0x8F)))
+            return false;
+        i += continuation + 1;
+    }
+    return true;
+}
+
+// Targets built with non-MSVC toolchains commonly emit already-UTF-8 bytes
+// through OutputDebugStringA; converting those from the ANSI code page would
+// mangle them, so they are left alone. Everything else is assumed to be ACP.
+std::string debug_text_to_utf8(const std::string& raw) {
+    if (raw.empty() || is_valid_utf8(raw)) return raw;
+    int n = MultiByteToWideChar(CP_ACP, 0, raw.data(), (int)raw.size(), nullptr, 0);
+    if (n <= 0) return raw;
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, raw.data(), (int)raw.size(), w.data(), n);
+    return to_utf8(w);
+}
+
+// Decodes an OUTPUT_DEBUG_STRING_INFO payload (fUnicode selects UTF-16LE
+// against the process ACP) up to its terminator. Built byte-wise because the
+// debuggee's buffer is not guaranteed to be 2-byte aligned.
+std::string debug_string_payload(const std::string& buf, bool unicode) {
+    if (!unicode) {
+        return debug_text_to_utf8(buf.substr(0, strnlen(buf.c_str(), buf.size())));
+    }
+    std::wstring w;
+    w.reserve(buf.size() / 2);
+    for (size_t k = 0; k + 1 < buf.size(); k += 2) {
+        wchar_t ch = (wchar_t)((unsigned char)buf[k] |
+                               ((unsigned char)buf[k + 1] << 8));
+        if (!ch) break;
+        w += ch;
+    }
+    return to_utf8(w);
+}
+
 // A 64-bit debugger sees WOW64 targets through a different context API, so the
 // bitness has to be known before touching registers or decoding instructions.
 bool detect_wow64(HANDLE proc) {
@@ -1024,17 +1089,22 @@ void Engine::process_event(DEBUG_EVENT& ev, bool& stop, DWORD& status) {
         case OUTPUT_DEBUG_STRING_EVENT: {
             OUTPUT_DEBUG_STRING_INFO& i = ev.u.DebugString;
             ProcessInfo* p = proc_by_pid(ev.dwProcessId);
-            if (p && i.lpDebugStringData && i.nDebugStringLength) {
+            // System processes (conhost.exe and friends) inherit the debug
+            // port; their own diagnostics are not part of the user's session
+            // and used to leak into the JSONL stream as noise.
+            if (p && !p->is_system && i.lpDebugStringData && i.nDebugStringLength) {
                 std::string buf(i.nDebugStringLength, '\0');
                 std::string e;
                 if (read_memory(p->handle, (uint64_t)i.lpDebugStringData, buf.data(),
                                 i.nDebugStringLength, e)) {
-                    // the target controls the length; it may not be
-                    // NUL-terminated inside that window
-                    buf.resize(strnlen(buf.c_str(), buf.size()));
+                    // The target controls the length and the encoding: it may
+                    // not be NUL-terminated inside the window, and it is UTF-16
+                    // or ACP depending on fUnicode.
+                    std::string text =
+                        debug_string_payload(buf, i.fUnicode != FALSE);
                     Json d = Json::obj();
                     d.set_u("pid", ev.dwProcessId);
-                    Output::instance().event("debug_string", trim(buf), d);
+                    Output::instance().event("debug_string", trim(text), d);
                 }
             }
             break;
@@ -1320,6 +1390,37 @@ void Engine::on_exception(DEBUG_EVENT& ev, bool& stop, DWORD& status) {
     // system DLLs live at the same addresses in every process, so the target's
     // planted INT3 would otherwise be blamed on / unplanted from the helper.
     ProcessInfo* ep = proc_by_pid(ev.dwProcessId);
+
+    // OutputDebugString arrives as a first-chance exception on modern Windows.
+    // The generic "pass" policy used to answer DBG_CONTINUE, which tells the OS
+    // the debugger handled it - so the DBWIN fallback never fired and the
+    // target's own debug output was silently lost (only OS helpers leaked
+    // through, because for them the exception is NOT handled). Decode it here:
+    // the narrow and wide variants differ only in encoding. A policy explicitly
+    // set to Break still stops the session.
+    if ((code == 0x40010006 || code == 0x4001000A) &&
+        (!first_chance || policy.lookup(code) != ExAction::Break)) {
+        const bool wide = code == 0x4001000A;
+        uint64_t len = er.NumberParameters >= 2 ? er.ExceptionInformation[0] : 0;
+        uint64_t ptr = er.NumberParameters >= 2 ? er.ExceptionInformation[1] : 0;
+        // System helpers (conhost.exe) are debugged only because they inherit
+        // the debug port; their diagnostics are not part of the session.
+        if (ep && !ep->is_system && ptr && len) {
+            if (len > 8192) len = 8192;
+            std::string buf((size_t)len, '\0');
+            std::string e;
+            if (read_memory(ep->handle, ptr, buf.data(), (size_t)len, e)) {
+                Json d = Json::obj();
+                d.set_u("pid", ev.dwProcessId);
+                Output::instance().event(
+                    "debug_string", trim(debug_string_payload(buf, wide)), d);
+            }
+        }
+        stop = false;
+        status = kContinue;
+        return;
+    }
+
     if (ep && ep->is_system) {
         stop = false;
         status = (norm == EXCEPTION_BREAKPOINT || norm == EXCEPTION_SINGLE_STEP) ? kContinue

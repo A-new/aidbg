@@ -1,6 +1,8 @@
-run
-continue
-continue
+# x86 DLL debugging through the built-in host (see dlltest.ajs for the notes).
+# Run with: aidbg --exe tests/sample_dll32.dll --script tests/dlltest32.ajs
 break sample_dll32!SampleEntry
+run SampleEntry
 continue
+continue
+info
 kill

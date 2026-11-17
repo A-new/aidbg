@@ -5,8 +5,8 @@ eval entry_point
 break entry_point
 disasm $entry 3
 notes
-notes save notes_test.json
+notes save tests/notes_test.json
 notes clear
-notes load notes_test.json
+notes load tests/notes_test.json
 notes
 kill

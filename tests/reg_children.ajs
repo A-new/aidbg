@@ -1,5 +1,12 @@
+# Child-process following, mixed architecture, per-process symbols.
+# Run with: aidbg --exe tests/spawner.exe --script tests/reg_children.ajs
+#
+# The breakpoint is set before `run`, so it is unresolved until the x86 child
+# (target32.exe) loads its PDB. `processes` must then show the x64 parent next
+# to the x86 child, and `regs` must switch to the x86 register set.
+break accumulate
 run
-processes
 continue
 processes
+regs rip
 kill

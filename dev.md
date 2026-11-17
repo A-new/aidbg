@@ -193,19 +193,31 @@ Streamable HTTP（`POST /mcp`，HTTP 响应即 JSON-RPC 响应）。Engine 非�
 
 ## 5. 测试
 
+**一键回归**：`python -I tests/run_regression.py`。逐条校验每个脚本的超时（默认
+90s，超时即失败——专治脚本卡死）、退出码、每一行 stdout 是合法 UTF-8 JSON（JSONL
+契约）、以及没有 `"ok":false`。`--e2e` 追加四个 Python 端到端测试，`--list` 查看
+分类，`--only <子串>` 只跑匹配项。**所有 `tests/*.ajs` 必须在脚本的
+`REGRESSIONS` / `IGNORED` 表里登记**，未登记或不存在的脚本直接判失败，避免新增
+脚本悄悄不跑。
+
 - **测试目标**（`tests/`，均带 PDB）：`target.exe`（x64）、`target32.exe`、`spawner.exe`
   （子进程）、`types_test.exe`、`imports_test.exe`、`sample_dll(.32).dll`。
 - **反检测探针**：`antidbg_probe(.32).exe` 跑 al-khaser 式 15 项检查；`selfcheck(.32).exe`
   运行时哈希自身文件（固定基址自校验）。
 - **回归脚本**（`*.ajs`，`--script` 驱动）：`hide_std`（hide 矩阵）、`reg_basic`、
-  `reg_children`、`reg_types`、`reg_patch`（补丁记录/合并/撤销/落盘）、`fixbase`、
-  `dlltest` 等。判定标准：目标输出文件内容 +
+  `reg_children`（父进程 + x86 子进程、按进程符号、混合架构寄存器）、`reg_types`、
+  `reg_patch`（补丁记录/合并/撤销/落盘）、`fixbase`、`dlltest` 等。
+  脚本本身不 `file` 目标，除 `hide_*`/`fixbase` 外需同时给 `--exe`
+  （如 `--exe tests/target.exe`；`reg_children` 用 `tests/spawner.exe`）。
+  判定标准：目标输出文件内容 +
   JSON 日志无意外 `"ok":false` + 进程正常退出。
 - **交互式回归**（python 驱动，需动态取 pid/基址的场景）：
   `tests/ws_test.py`（多进程 world-stop + 按进程符号，依赖 `tests/tickpair.exe`）、
   `tests/http_mcp_test.py`（MCP HTTP/SSE 端到端 16 项）、
   `tests/reloc_test.py`（dump 重定位还原）、
-  `tests/iat_reloc_test.py`（非零 slide + 损坏导入表的重建组合）；
+  `tests/iat_reloc_test.py`（非零 slide + 损坏导入表的重建组合）、
+  `tests/dbgstring_test.py`（调试字符串的 UTF-8 契约与系统进程过滤，依赖由
+  `tests/dbgstring.c` 编译的 `tests/dbgstring.exe`）；
   `tests/load_dll.exe`（配 `mk_dumpfix.bat` 构建）加载 dump 并调用导出做端到端验证。
 - 修 bug 必须配可复现脚本；注意 `Start-Process` 不给含空格参数加引号（测试脚本里用
   内嵌引号或脚本文件传参）。
@@ -264,6 +276,18 @@ Streamable HTTP（`POST /mcp`，HTTP 响应即 JSON-RPC 响应）。Engine 非�
   并 TF 单步，否则会无限重复命中。读/写型是 trap 语义，不需要。
 - `conhost.exe` 会继承 `DEBUG_PROCESS` 的调试端口；不区分系统进程会导致 `current` 被抢、
   hide 往 conhost 的 ntdll 布 INT3、以及系统 DLL 同址导致的断点误归属。
+- **`OutputDebugString` 以首异常投递**（`DBG_PRINTEXCEPTION_C` 0x40010006 /
+  `DBG_PRINTEXCEPTION_WIDE_C` 0x4001000A）。此前默认策略 `Pass` 回 `DBG_CONTINUE`，
+  系统认为调试器已处理，DBWIN 回退不再触发 → 目标的调试字符串**全部丢失**，只有
+  系统进程（`kNotHandled`）漏成 `debug_string` 噪音。现在在 `on_exception` 里直接解码
+  （`[0]`=长度、`[1]`=指针；WIDE 为 UTF-16LE），ANSI 串做 ACP→UTF-8 转换后再断言合法
+  UTF-8（非 MSVC 目标常直接发 UTF-8，合法则原样保留），系统进程的输出丢弃。
+- **hide 与调试字符串互斥**：kernel32 只在 `PEB.BeingDebugged` 非零时投递该异常，
+  hide 清零后目标调用 `OutputDebugString` 不会产生任何事件（不是 aidbg 吞掉）。
+  需要调试字符串时用 `--hide off`；Manual 已注明。
+- **DLL 宿主无 export 时永久驻留**（`dllhost.c` 末尾的 `Sleep` 循环，这是设计：保持
+  DLL 映射以便手工分析）。因此 `.ajs` 脚本在 DllMain 之后不能再裸 `continue`——会无限
+  阻塞。`dlltest*.ajs` 现在给 `run` 传 export，让符号断点真正命中，避免空等。
 
 ---
 

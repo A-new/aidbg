@@ -1,9 +1,13 @@
-run
-info
-continue
-continue
-info
+# DLL debugging through the built-in host: the DLL is loaded and one export is
+# called, so the symbol breakpoint set before `run` resolves when the module
+# maps and is hit when the export runs.
+# Run with: aidbg --exe tests/sample_dll.dll --script tests/dlltest.ajs
+#
+# Without an export the host stays alive by design (dllhost.c), so never wait
+# on an unbounded `continue` after DllMain has been reached.
 break sample_dll!SampleEntry
+run SampleEntry
+continue
 continue
 info
 kill
