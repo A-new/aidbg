@@ -6,14 +6,17 @@ namespace aj {
 
 std::string last_error_text(DWORD err) {
     if (err == 0) err = ::GetLastError();
-    LPSTR buf = nullptr;
-    DWORD n = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+    // FormatMessageA returns the system text in the ANSI code page; putting
+    // those bytes straight into the JSON envelope produces invalid UTF-8 on a
+    // non-English system. Ask for UTF-16 and convert.
+    LPWSTR buf = nullptr;
+    DWORD n = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
                                  FORMAT_MESSAGE_IGNORE_INSERTS,
                              nullptr, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                             (LPSTR)&buf, 0, nullptr);
+                             (LPWSTR)&buf, 0, nullptr);
     std::string msg;
     if (n && buf) {
-        msg.assign(buf, n);
+        msg = to_utf8(std::wstring(buf, n));
         LocalFree(buf);
         while (!msg.empty() && (msg.back() == '\r' || msg.back() == '\n' || msg.back() == ' '))
             msg.pop_back();

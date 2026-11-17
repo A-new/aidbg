@@ -120,8 +120,12 @@ def run_ajs(name, exe, timeout):
 
 
 def run_py(path, timeout):
+    # The child prints Chinese detail; force UTF-8 stdio so it does not crash
+    # on a GBK console. -X is honored even in isolated (-I) mode, whereas
+    # PYTHONIOENCODING would be ignored there.
     try:
-        res = subprocess.run([sys.executable, "-I", os.path.join(ROOT, path)],
+        res = subprocess.run([sys.executable, "-I", "-X", "utf8=1",
+                              os.path.join(ROOT, path)],
                              cwd=ROOT, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, timeout=timeout)
     except subprocess.TimeoutExpired:

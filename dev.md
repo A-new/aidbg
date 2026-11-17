@@ -201,11 +201,17 @@ Streamable HTTP（`POST /mcp`，HTTP 响应即 JSON-RPC 响应）。Engine 非�
 脚本悄悄不跑。
 
 **CI**（`.github/workflows/ci.yml`）：`windows-latest` 上执行 `build.bat Release`、
-`.ajs` 回归、`--e2e` 全量回归，并上传 `build/aidbg.exe` 产物；推送 tag 时额外校验
-**二进制 `--version` 与 tag 一致**，防止把过期构建发进 Release。
+`tests\build_targets.bat`（重建带符号的测试目标）、`.ajs` 回归、`--e2e` 全量回归，
+并上传 `build/aidbg.exe` 产物；推送 tag 时额外校验**二进制 `--version` 与 tag
+一致**，防止把过期构建发进 Release。
 
-- **测试目标**（`tests/`，均带 PDB）：`target.exe`（x64）、`target32.exe`、`spawner.exe`
+- **测试目标**（`tests/`）：`target.exe`（x64）、`target32.exe`、`spawner.exe`
   （子进程）、`types_test.exe`、`imports_test.exe`、`sample_dll(.32).dll`。
+  **exe 入库、PDB 不入库**（每个约 7 MB）。依赖非导出符号的回归
+  （`accumulate` / `Node` / `g_ticks`）在干净检出或 CI 上必须先跑
+  `tests\build_targets.bat`（`/Z7` + `/DEBUG` 原地重建 `target/target32/types_test/
+  tickpair` 及匹配 PDB）；只用导出表或模块相对地址的测试仍使用入库 exe。
+  该脚本会覆盖 `tests/` 下对应 exe，本地跑完可用 `git checkout -- tests/*.exe` 还原。
 - **反检测探针**：`antidbg_probe(.32).exe` 跑 al-khaser 式 15 项检查；`selfcheck(.32).exe`
   运行时哈希自身文件（固定基址自校验）。
 - **回归脚本**（`*.ajs`，`--script` 驱动）：`hide_std`（hide 矩阵）、`reg_basic`、

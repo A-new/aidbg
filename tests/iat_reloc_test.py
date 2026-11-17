@@ -36,6 +36,27 @@ def check(name, cond, detail=""):
         fails.append(name)
 
 
+def read_bytes(addr, n):
+    j = cmd(f"read {hex(addr)} {n}")
+    if not j["ok"]:
+        raise RuntimeError(j["error"]["message"])
+    return bytes.fromhex(j["data"]["bytes"].replace(" ", ""))
+
+
+def import_dir_va(base):
+    """Parse the in-memory PE header so the test does not depend on the exact
+    layout of a particular build of target.exe (CI rebuilds it for symbols)."""
+    hdr = read_bytes(base, 0x400)
+    e_lfanew = int.from_bytes(hdr[0x3C:0x40], "little")
+    opt = e_lfanew + 0x18
+    magic = int.from_bytes(hdr[opt:opt + 2], "little")
+    data_dir = opt + (0x70 if magic == 0x20B else 0x60)
+    rva = int.from_bytes(hdr[data_dir + 8:data_dir + 12], "little")  # dir[1] = import
+    if rva == 0:
+        raise RuntimeError("target has no import directory")
+    return base + rva
+
+
 try:
     cmd("file tests/target.exe")
     cmd("run")
@@ -44,7 +65,9 @@ try:
     check("relocated session", base != 0x140000000, hex(base))
 
     # destroy the original import directory (packed-binary simulation)
-    j = cmd(f"write {hex(base + 0xb5398)} " + "58 " * 20)
+    iva = import_dir_va(base)
+    check("import dir located", iva != base, hex(iva))
+    j = cmd(f"write {hex(iva)} " + "58 " * 20)
     check("corrupt import dir", j["ok"], j.get("error", {}).get("message", ""))
 
     j = cmd("dump tests/out_combo.exe keepbase")

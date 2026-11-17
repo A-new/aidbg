@@ -29,6 +29,13 @@ jobs:
         shell: cmd
         run: build\aidbg.exe --version
 
+      # The committed test executables ship without PDBs, so symbol-dependent
+      # regressions (accumulate / Node / g_ticks) need matching PDBs built from
+      # source before they run.
+      - name: Build test targets (symbols)
+        shell: cmd
+        run: tests\build_targets.bat
+
       # A tag must ship the binary whose reported version it names. This guards
       # the manual release flow (bump version.h, rebuild, tag) against a stale
       # build being published.

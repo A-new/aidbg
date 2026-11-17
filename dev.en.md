@@ -206,9 +206,17 @@ tables; an unclassified or missing script fails the run, so a new test can never
 silently skipped.
 
 **CI** (`.github/workflows/ci.yml`): on `windows-latest` it builds with `build.bat Release`,
-runs the `.ajs` suite and the `--e2e` suite, and uploads `build/aidbg.exe`. On a tag push it
-additionally checks that the binary's `--version` matches the tag, so a stale build cannot
-be published.
+rebuilds the symbol-carrying test targets with `tests\build_targets.bat`, runs the `.ajs`
+suite and the `--e2e` suite, and uploads `build/aidbg.exe`. On a tag push it additionally
+checks that the binary's `--version` matches the tag, so a stale build cannot be published.
+
+The test **executables are committed but their PDBs are not** (~7 MB each). Regressions
+that resolve non-export symbols (`accumulate`, `Node`, `g_ticks`) therefore need
+`tests\build_targets.bat` on a clean checkout or in CI: it rebuilds
+`target/target32/types_test/tickpair` in place with `/Z7` + `/DEBUG` and matching PDBs.
+Tests that only use exports or module-relative addresses keep the committed binaries.
+The script overwrites the tracked executables; restore them with
+`git checkout -- tests/*.exe` after a local run.
 
 - **Targets** (`tests/`, all with PDBs): `target.exe` (x64), `target32.exe`, `spawner.exe`
   (children), `types_test.exe`, `imports_test.exe`, `sample_dll(.32).dll`.
