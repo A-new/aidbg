@@ -2,14 +2,17 @@
 table must still rebuild the imports (the scan must see runtime pointers
 before the relocation repair rewrites them)."""
 import json
+import os
 import subprocess
 import sys
 import time
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 proc = subprocess.Popen(
     [r"build\aidbg.exe", "--json", "--aslr"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    cwd=r"D:\crack\debug\code\aidbg", text=True, encoding="utf-8", errors="replace")
+    cwd=ROOT, text=True, encoding="utf-8", errors="replace")
 
 
 def cmd(line):

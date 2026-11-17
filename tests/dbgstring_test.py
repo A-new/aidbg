@@ -13,10 +13,11 @@ design (see dev.md).
 tests/dbgstring.exe is built from dbgstring.c (/MT /utf-8, x64).
 """
 import json
+import os
 import subprocess
 import sys
 
-ROOT = r"D:\crack\debug\code\aidbg"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXPECTED = [
     "UTF8 未指定的错误",
     "ANSI 未指定的错误",

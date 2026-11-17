@@ -1,18 +1,20 @@
 """End-to-end test of the aidbg MCP HTTP/SSE server (loopback)."""
 import json
+import os
 import socket
 import subprocess
 import sys
 import threading
 import time
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = 8791
 TOKEN = "testtok-1234"
 BASE = ("127.0.0.1", PORT)
 
 proc = subprocess.Popen(
     [r"build\aidbg.exe", "--mcp", "--port", str(PORT), "--token", TOKEN],
-    cwd=r"D:\crack\debug\code\aidbg",
+    cwd=ROOT,
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 fails = []

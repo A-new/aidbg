@@ -1,12 +1,15 @@
 import json
+import os
 import subprocess
 import sys
 import time
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 proc = subprocess.Popen(
     [r"build\aidbg.exe", "--json"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    cwd=r"D:\crack\debug\code\aidbg", text=True, encoding="utf-8", errors="replace")
+    cwd=ROOT, text=True, encoding="utf-8", errors="replace")
 
 
 def send(line):

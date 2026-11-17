@@ -1,15 +1,18 @@
 """Verifies the keepbase dump restores the preferred base and un-applies
 relocations (dump taken from an ASLR-relocated module, slide != 0)."""
 import json
+import os
 import struct
 import subprocess
 import sys
 import time
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 proc = subprocess.Popen(
     [r"build\aidbg.exe", "--json", "--aslr"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    cwd=r"D:\crack\debug\code\aidbg", text=True, encoding="utf-8", errors="replace")
+    cwd=ROOT, text=True, encoding="utf-8", errors="replace")
 
 
 def cmd(line):
